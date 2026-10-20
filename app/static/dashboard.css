@@ -1,0 +1,21 @@
+body.dash { overflow: hidden; }
+.dash-grid { display: grid; grid-template-columns: minmax(360px, 46%) 1fr; gap: 10px; padding: 10px; height: calc(100vh - 30px); }
+.dash-cols { display: grid; grid-template-rows: 1fr 1fr; gap: 10px; min-height: 0; }
+.dash-dir { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; overflow: hidden; display: flex; flex-direction: column; gap: 6px; cursor: pointer; }
+.dash-dir.sel { outline: 2px solid var(--accent); }
+.dash-dir .hd { display: flex; align-items: center; gap: 8px; }
+.dash-dir .hd b { font-size: 1rem; }
+.dash-dir .hero { display: flex; align-items: baseline; gap: 10px; }
+.dash-dir .hero .v { font-size: 2.6rem; font-weight: 750; font-variant-numeric: tabular-nums; line-height: 1; }
+.dash-dir .alt { display: grid; grid-template-columns: 6px 1fr auto auto; gap: 4px 10px; align-items: center; font-size: .92rem; }
+.dash-dir .alt i { height: 16px; border-radius: 3px; }
+.dash-dir .alt .n { font-variant-numeric: tabular-nums; text-align: right; }
+.dash-map { position: relative; border-radius: var(--radius); overflow: hidden; border: 1px solid var(--border); }
+.dash-foot { height: 30px; padding: 0 12px; font-size: .75rem; color: var(--muted); display: flex; align-items: center; gap: 10px; }
+@media (max-width: 700px), (orientation: portrait) {
+  body.dash { overflow: auto; }
+  .dash-grid { grid-template-columns: 1fr; height: auto; }
+  .dash-cols { grid-template-rows: auto; }
+  .dash-map { height: 45vh; }
+}
+.spark { flex: 1; min-height: 80px; }

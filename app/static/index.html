@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>8star-routes</title>
+  <link rel="icon" href="{{BASE}}/static/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="{{BASE}}/static/vendor/leaflet.css">
+  <link rel="stylesheet" href="{{BASE}}/static/styles.css?v={{VERSION}}">
+</head>
+<body data-base="{{BASE}}">
+  <header class="top">
+    <div class="brand">8star<span>-routes</span></div>
+    <span id="mode-badge" class="badge neutral">…</span>
+    <nav class="tabs" id="tabs">
+      <a href="#map" data-view="map">Map</a>
+      <a href="#analysis" data-view="analysis">Analysis</a>
+      <a href="#plan" data-view="plan">Plan a trip</a>
+      <a href="#setup" data-view="setup">Setup</a>
+      <a href="#budget" data-view="budget">Budget</a>
+    </nav>
+    <div class="spacer"></div>
+    <button id="logout" class="small hidden">Log out</button>
+  </header>
+
+  <main>
+    <div class="banners" id="banners"></div>
+
+    <!-- MAP ------------------------------------------------------------------>
+    <section class="view" id="view-map">
+      <div class="map-layout">
+        <div class="map-panel">
+          <div class="card">
+            <div class="row">
+              <select id="m-direction" aria-label="Direction"></select>
+              <div class="seg" role="tablist">
+                <button id="m-current" class="on">Current</button>
+                <button id="m-history">History</button>
+              </div>
+            </div>
+            <div id="m-history-controls" class="hidden" style="margin-top:10px">
+              <div class="row">
+                <input type="date" id="m-date" aria-label="Date">
+                <select id="m-time" aria-label="Observation time"></select>
+              </div>
+              <div class="row" style="margin-top:8px">
+                <button id="m-prev" class="small">◀ Previous</button>
+                <button id="m-next" class="small">Next ▶</button>
+                <span class="spacer"></span>
+                <button id="m-prev-change" class="small" title="Previous recommendation change">◀ Change</button>
+                <button id="m-next-change" class="small" title="Next recommendation change">Change ▶</button>
+              </div>
+              <div id="m-timeline" class="chart" style="margin-top:8px" aria-label="Collection timeline for the selected day"></div>
+              <div class="legend">
+                <span><i class="box" style="background:var(--accent)"></i>Recommendation changed</span>
+                <span><i class="box" style="background:#9aa0a6"></i>Collected</span>
+                <span><i class="box" style="background:var(--warn)"></i>Partial</span>
+                <span><i class="box" style="background:var(--bad)"></i>Missing / failed</span>
+              </div>
+            </div>
+            <div id="m-current-controls" class="row" style="margin-top:10px">
+              <label class="row" style="gap:6px"><input type="checkbox" id="m-traffic"> Live traffic overlay</label>
+              <span class="spacer"></span>
+              <button id="m-collect" class="small hidden" title="Make an explicit, budgeted routing request now">Collect now</button>
+            </div>
+          </div>
+          <div class="card">
+            <div id="m-stamp" class="stamp">No observation loaded</div>
+            <div id="m-flags" class="tags row" style="margin-top:6px"></div>
+            <p class="small muted" style="margin:8px 0 0">Values are TomTom <b>estimates</b> at the time of observation, not measured journeys.
+              “Traffic delay” is TomTom’s reported delay field.</p>
+          </div>
+          <div id="m-routes" class="map-panel" style="overflow:visible"></div>
+        </div>
+        <div class="map-wrap"><div id="map" class="map"></div><div id="map-note" class="map-note hidden"></div></div>
+      </div>
+    </section>
+
+    <!-- ANALYSIS ------------------------------------------------------------->
+    <section class="view" id="view-analysis">
+      <div class="card">
+        <div class="row end">
+          <div class="field"><label for="a-direction">Direction</label><select id="a-direction"></select></div>
+          <div class="field"><label for="a-from">From</label><input type="date" id="a-from"></div>
+          <div class="field"><label for="a-to">To</label><input type="date" id="a-to"></div>
+          <div class="row" style="gap:4px">
+            <button class="small" data-preset="7">7 days</button>
+            <button class="small" data-preset="28">28 days</button>
+            <button class="small" data-preset="90">90 days</button>
+          </div>
+          <div class="field"><label>Weekdays</label>
+            <div class="chips" id="a-weekdays"></div></div>
+          <div class="field"><label for="a-tfrom">Departure between</label>
+            <div class="row" style="gap:4px"><input type="time" id="a-tfrom" step="900"><span>–</span><input type="time" id="a-tto" step="900"></div></div>
+          <button id="a-apply" class="primary">Apply</button>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Route comparison</h2>
+        <div id="a-summary" class="small muted" style="margin-bottom:8px"></div>
+        <div class="table-wrap"><table id="a-table"></table></div>
+        <p class="small muted" id="a-method"></p>
+      </div>
+      <div class="card">
+        <div class="row"><h2>One day</h2><span class="spacer"></span><input type="date" id="a-day" aria-label="Day"></div>
+        <h3 style="margin-top:10px">Estimated travel time</h3>
+        <div id="a-legend-day" class="legend" style="margin:4px 0"></div>
+        <div id="a-chart-travel" class="chart"></div>
+        <h3 style="margin-top:14px">Traffic delay (TomTom field)</h3>
+        <div id="a-chart-delay" class="chart"></div>
+        <h3 style="margin-top:14px">Recommendation timeline</h3>
+        <div id="a-rec-timeline" class="chart"></div>
+        <div id="a-rec-legend" class="legend"></div>
+      </div>
+      <div class="card">
+        <div class="row end">
+          <h2>Weekday × time of day</h2><span class="spacer"></span>
+          <div class="field"><label for="h-key">Route</label><select id="h-key"></select></div>
+          <div class="field"><label for="h-metric">Metric</label>
+            <select id="h-metric"><option value="travel_time_s">Median travel time</option><option value="traffic_delay_s">Median traffic delay</option></select></div>
+          <div class="field"><label for="h-bucket">Bucket</label>
+            <select id="h-bucket"><option value="30">30 min</option><option value="60">60 min</option><option value="15">15 min</option></select></div>
+        </div>
+        <div id="a-heatmap" style="margin-top:10px; overflow-x:auto"></div>
+        <p class="small muted">Hatched cells have no successful observations. Cell tooltips show the sample count.</p>
+      </div>
+    </section>
+
+    <!-- PLAN ----------------------------------------------------------------->
+    <section class="view" id="view-plan">
+      <div class="card">
+        <h2>When should I leave?</h2>
+        <div class="row end">
+          <div class="field"><label for="p-direction">Direction</label><select id="p-direction"></select></div>
+          <div class="field"><label for="p-date">Date</label><input type="date" id="p-date"></div>
+          <div class="field"><label for="p-arrive">Arrive by</label><input type="time" id="p-arrive" value="09:00" step="300"></div>
+          <div class="field"><label for="p-pct">Reliability</label>
+            <select id="p-pct"><option value="90">90% (recommended)</option><option value="95">95%</option><option value="80">80%</option><option value="75">75%</option><option value="50">50% (median)</option></select></div>
+          <div class="field"><label for="p-weeks">History</label>
+            <select id="p-weeks"><option value="12">12 weeks</option><option value="4">4 weeks</option><option value="8">8 weeks</option><option value="26">26 weeks</option></select></div>
+          <div class="field"><label for="p-match">Compare with</label>
+            <select id="p-match"><option value="1">Same weekday</option><option value="0">All weekdays / weekend days</option></select></div>
+          <button id="p-go" class="primary">Plan</button>
+        </div>
+      </div>
+      <div id="p-result"></div>
+      <div class="card" id="p-live-card">
+        <h2>Optional: check the live estimate now</h2>
+        <p class="small muted">This is separate from the historical recommendation above. It makes explicit routing requests that count against the budget.</p>
+        <button id="p-live" class="small">Check live now</button>
+        <div id="p-live-result" style="margin-top:8px"></div>
+      </div>
+    </section>
+
+    <!-- SETUP ---------------------------------------------------------------->
+    <section class="view" id="view-setup">
+      <div class="setup-layout">
+        <div>
+          <div class="card" id="s-journey"></div>
+          <div class="card" id="s-corridors"></div>
+          <div class="card" id="s-variants"></div>
+        </div>
+        <div class="setup-map"><div id="setup-map" class="map"></div><div id="setup-note" class="map-note"></div></div>
+      </div>
+    </section>
+
+    <!-- BUDGET --------------------------------------------------------------->
+    <section class="view" id="view-budget">
+      <div id="b-content"></div>
+    </section>
+  </main>
+
+  <div id="login" class="overlay hidden">
+    <form class="card login" id="login-form">
+      <h2>8star-routes</h2>
+      <p class="muted small">Log in with the administrator password.</p>
+      <div class="field"><label for="login-pw">Password</label><input type="password" id="login-pw" autocomplete="current-password" required></div>
+      <p id="login-err" class="small" style="color:var(--bad)"></p>
+      <button class="primary" type="submit">Log in</button>
+    </form>
+  </div>
+
+  <script src="{{BASE}}/static/vendor/leaflet.js"></script>
+  <script src="{{BASE}}/static/common.js?v={{VERSION}}"></script>
+  <script src="{{BASE}}/static/charts.js?v={{VERSION}}"></script>
+  <script src="{{BASE}}/static/app.js?v={{VERSION}}"></script>
+</body>
+</html>

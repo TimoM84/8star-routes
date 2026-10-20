@@ -1,0 +1,148 @@
+{
+  "formatVersion": "0.0.12",
+  "_note": "SYNTHETIC fixture shaped like a TomTom calculateRoute response; not a recorded response.",
+  "routes": [
+    {
+      "summary": {
+        "lengthInMeters": 24512,
+        "travelTimeInSeconds": 1563,
+        "trafficDelayInSeconds": 0,
+        "trafficLengthInMeters": 0,
+        "departureTime": "2026-10-20T08:00:00+02:00",
+        "arrivalTime": "2026-10-20T08:26:03+02:00",
+        "noTrafficTravelTimeInSeconds": 1488,
+        "historicTrafficTravelTimeInSeconds": 1601,
+        "liveTrafficIncidentsTravelTimeInSeconds": 1563
+      },
+      "legs": [
+        {
+          "summary": {},
+          "points": [
+            {
+              "latitude": 52.30575,
+              "longitude": 5.07084
+            },
+            {
+              "latitude": 52.31281,
+              "longitude": 5.10523
+            },
+            {
+              "latitude": 52.32702,
+              "longitude": 5.15601
+            },
+            {
+              "latitude": 52.34052,
+              "longitude": 5.20799
+            },
+            {
+              "latitude": 52.364,
+              "longitude": 5.288
+            },
+            {
+              "latitude": 52.3585,
+              "longitude": 5.315
+            },
+            {
+              "latitude": 52.3412,
+              "longitude": 5.40276
+            }
+          ]
+        }
+      ],
+      "sections": [
+        {
+          "startPointIndex": 0,
+          "endPointIndex": 6,
+          "sectionType": "TRAVEL_MODE",
+          "travelMode": "car"
+        }
+      ],
+      "guidance": {
+        "instructions": [
+          {
+            "roadNumbers": [
+              "N211"
+            ],
+            "street": "Wippolderlaan"
+          },
+          {
+            "roadNumbers": [
+              "A4"
+            ]
+          },
+          {
+            "roadNumbers": [
+              "A12"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "summary": {
+        "lengthInMeters": 23640,
+        "travelTimeInSeconds": 1712,
+        "trafficDelayInSeconds": 95,
+        "trafficLengthInMeters": 1800,
+        "departureTime": "2026-10-20T08:00:00+02:00",
+        "arrivalTime": "2026-10-20T08:28:32+02:00"
+      },
+      "legs": [
+        {
+          "points": [
+            {
+              "latitude": 52.30575,
+              "longitude": 5.07084
+            },
+            {
+              "latitude": 52.3,
+              "longitude": 5.13
+            },
+            {
+              "latitude": 52.2985,
+              "longitude": 5.21
+            },
+            {
+              "latitude": 52.3155,
+              "longitude": 5.2896
+            },
+            {
+              "latitude": 52.329,
+              "longitude": 5.348
+            },
+            {
+              "latitude": 52.3412,
+              "longitude": 5.40276
+            }
+          ]
+        }
+      ],
+      "sections": [
+        {
+          "startPointIndex": 2,
+          "endPointIndex": 3,
+          "sectionType": "TRAFFIC",
+          "simpleCategory": "JAM",
+          "effectiveSpeedInKmh": 31,
+          "delayInSeconds": 95,
+          "magnitudeOfDelay": 1
+        }
+      ],
+      "guidance": {
+        "instructions": [
+          {
+            "roadNumbers": [
+              "A13"
+            ]
+          },
+          {
+            "roadNumbers": [
+              "N470"
+            ],
+            "street": "Oostweg"
+          }
+        ]
+      }
+    }
+  ]
+}

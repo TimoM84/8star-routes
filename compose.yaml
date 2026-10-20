@@ -1,0 +1,52 @@
+# 8star-routes. Start with: docker compose up -d --build
+# Put secrets in Dockhand's stack environment (or a local .env next to this file); never commit them.
+services:
+  8star-routes:
+    build: .
+    image: 8star-routes:local
+    container_name: 8star-routes
+    restart: unless-stopped
+    ports:
+      - "${HOST_PORT:-8080}:${PORT:-8080}"
+    environment:
+      TOMTOM_API_KEY: ${TOMTOM_API_KEY:?Set TOMTOM_API_KEY}
+      APP_PASSWORD: ${APP_PASSWORD:?Set APP_PASSWORD (at least 12 characters)}
+      SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET (openssl rand -hex 32)}
+      API_READ_TOKEN: ${API_READ_TOKEN:-}
+      EMBED_TOKEN: ${EMBED_TOKEN:-}
+      TOMTOM_MAP_KEY: ${TOMTOM_MAP_KEY:-}
+      APP_MODE: ${APP_MODE:-live}
+      PORT: ${PORT:-8080}
+      BASE_PATH: ${BASE_PATH:-}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+      TIMEZONE: ${TIMEZONE:-Europe/Amsterdam}
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-auto}
+      FRAME_ANCESTORS: ${FRAME_ANCESTORS:-'self'}
+      COLLECTION_ENABLED: ${COLLECTION_ENABLED:-true}
+      COLLECTION_INTERVAL_MINUTES: ${COLLECTION_INTERVAL_MINUTES:-15}
+      UNRESTRICTED_MAX_ALTERNATIVES: ${UNRESTRICTED_MAX_ALTERNATIVES:-2}
+      ROUTING_MONTHLY_ALLOWANCE: ${ROUTING_MONTHLY_ALLOWANCE:-20000}
+      ROUTING_SAFETY_RESERVE: ${ROUTING_SAFETY_RESERVE:-2000}
+      ROUTING_OTHER_APPS_ALLOWANCE: ${ROUTING_OTHER_APPS_ALLOWANCE:-0}
+      ROUTING_OPENING_USAGE: ${ROUTING_OPENING_USAGE:-0}
+      ROUTING_WARNING_PERCENT: ${ROUTING_WARNING_PERCENT:-80}
+      ALLOWANCE_PERIOD: ${ALLOWANCE_PERIOD:-monthly}
+      ALLOWANCE_RESET_TIMEZONE: ${ALLOWANCE_RESET_TIMEZONE:-UTC}
+      ALLOWANCE_RESET_CONFIRMED: ${ALLOWANCE_RESET_CONFIRMED:-false}
+      MAP_TILE_MODE: ${MAP_TILE_MODE:-proxy}
+      OBSERVATION_RETENTION_DAYS: ${OBSERVATION_RETENTION_DAYS:-0}
+      BACKUP_KEEP: ${BACKUP_KEEP:-14}
+    volumes:
+      - routes-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    stop_grace_period: 40s
+
+volumes:
+  routes-data:

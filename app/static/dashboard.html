@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>8star-routes dashboard</title>
+  <link rel="icon" href="{{BASE}}/static/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="{{BASE}}/static/vendor/leaflet.css">
+  <link rel="stylesheet" href="{{BASE}}/static/styles.css?v={{VERSION}}">
+  <link rel="stylesheet" href="{{BASE}}/static/dashboard.css?v={{VERSION}}">
+</head>
+<body data-base="{{BASE}}" class="dash">
+  <div class="dash-grid">
+    <div class="dash-cols" id="cols"></div>
+    <div class="dash-map"><div id="dmap" class="map"></div></div>
+  </div>
+  <div class="dash-foot" id="foot"></div>
+  <script src="{{BASE}}/static/vendor/leaflet.js"></script>
+  <script src="{{BASE}}/static/common.js?v={{VERSION}}"></script>
+  <script src="{{BASE}}/static/charts.js?v={{VERSION}}"></script>
+  <script src="{{BASE}}/static/dashboard.js?v={{VERSION}}"></script>
+</body>
+</html>
