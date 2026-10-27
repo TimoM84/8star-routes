@@ -98,6 +98,26 @@ def recover_after_restart(db: Database, budget: Budget) -> None:
         db.event("warning", "recovery", f"Recovered after restart: {n} open cycle(s), {m} pending request(s) (still counted).")
 
 
+def purge_before(db: Database, cutoff: str) -> int:
+    """Retention: delete observations and cycles older than `cutoff`. The request ledger is kept (budget history).
+
+    Ledger rows keep their counts but lose the link to the deleted cycle, otherwise the foreign key would
+    block the delete. Geometries still used by a corridor or as a route family's representative are kept.
+    """
+    with db.tx():
+        n = db.execute("DELETE FROM observations WHERE intended_utc < ?", (cutoff,)).rowcount
+        db.execute("UPDATE request_ledger SET cycle_id = NULL WHERE cycle_id IN "
+                   "(SELECT id FROM collection_cycles WHERE COALESCE(slot_utc, started_utc) < ?)", (cutoff,))
+        db.execute("DELETE FROM collection_cycles WHERE COALESCE(slot_utc, started_utc) < ?", (cutoff,))
+        db.execute("DELETE FROM route_variants WHERE last_seen_utc < ? AND id NOT IN (SELECT variant_id FROM observations WHERE variant_id IS NOT NULL) "
+                   "AND id NOT IN (SELECT reference_variant_id FROM corridors WHERE reference_variant_id IS NOT NULL) "
+                   "AND id NOT IN (SELECT preview_variant_id FROM corridors WHERE preview_variant_id IS NOT NULL) "
+                   "AND id NOT IN (SELECT representative_variant_id FROM route_families)", (cutoff,))
+    if n:
+        db.event("info", "retention", f"Retention removed {n} observations older than {cutoff}.")
+    return n
+
+
 class Scheduler:
     def __init__(self, db_factory: Callable[[], Database], cfg: Config, make_collector: Callable[[Database], Collector],
                  clock: Callable[[], datetime] = utcnow):
@@ -149,12 +169,7 @@ class Scheduler:
                 db.event("warning", "backup", f"Daily backup failed: {type(e).__name__}")
         if self.cfg.observation_retention_days > 0 and db.get_setting("last_retention") != local.date().isoformat():
             cutoff = iso(now - timedelta(days=self.cfg.observation_retention_days))
-            with db.tx():
-                db.execute("DELETE FROM observations WHERE intended_utc < ?", (cutoff,))
-                db.execute("DELETE FROM collection_cycles WHERE COALESCE(slot_utc, started_utc) < ?", (cutoff,))
-                db.execute("DELETE FROM route_variants WHERE last_seen_utc < ? AND id NOT IN (SELECT variant_id FROM observations WHERE variant_id IS NOT NULL) "
-                           "AND id NOT IN (SELECT reference_variant_id FROM corridors WHERE reference_variant_id IS NOT NULL) "
-                           "AND id NOT IN (SELECT preview_variant_id FROM corridors WHERE preview_variant_id IS NOT NULL)", (cutoff,))
+            purge_before(db, cutoff)
             db.set_setting("last_retention", local.date().isoformat())
 
     def _run(self) -> None:

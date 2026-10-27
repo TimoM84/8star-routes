@@ -123,7 +123,9 @@ def migrate(db: Database, backup_dir: Path | None = None) -> list[str]:
     if not pending:
         return []
     if done and backup_dir is not None:
-        backup(db, backup_dir, prefix="pre-migration")
+        # Fails (and stops the start-up) before anything changes, e.g. when the disk is full.
+        path = backup(db, backup_dir, prefix="pre-migration")
+        log.info("pre-migration backup written: %s (pending: %s)", path, ", ".join(p.stem for p in pending))
     applied = []
     for p in pending:
         sql = p.read_text(encoding="utf-8")

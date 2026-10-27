@@ -47,6 +47,13 @@ and the projected pause time. Ways to create more headroom:
 - Fewer corridors: each corridor in both directions costs 192 a day (5,952 a month).
 - A smaller safety reserve, if you are sure nothing else uses the key.
 
+**The application never raises its own usage.** No setting is changed automatically; the collection interval and
+corridors only change when you change them. `ROUTING_HARD_CEILING` can replace the computed ceiling, but it is
+clamped to *allowance − other apps*, so even a typo cannot push the guard beyond the TomTom allowance (the Budget page
+shows a warning when the value was clamped). The Budget page also shows requests per day (scheduled vs. extra), the
+remaining spare after the rest of the month's schedule, and whether scheduled collection is running (thread,
+lease, last heartbeat, next slot, last cycle).
+
 Counting is conservative: an attempt is written to the ledger and counted *before* it is sent, and it stays counted
 when it fails, times out, or the application stops during the request. Requests blocked by the guard are logged
 but not counted (they never left the server).
@@ -63,6 +70,11 @@ but not counted (they never left the server).
   If TomTom itself answers that the quota is exhausted, collection pauses until the next period.
 
 ## Verification status (October 2026)
+
+**Verified** (TomTom's public price announcement, read via web search because the TomTom hosts were blocked):
+monthly free tiers since 1 July 2026 of 20,000 Routing requests, 200,000 Map Display raster tiles and 200,000
+Traffic raster tiles. **Not verified**: everything in the list below, the reset moment, behaviour when the limit is
+exceeded (block or overage billing), and the storage terms.
 
 The development environment could not reach `developer.tomtom.com`, `docs.tomtom.com` or `api.tomtom.com`
 (outbound network policy). These points are therefore **assumptions to confirm**, and every one of them is configurable:

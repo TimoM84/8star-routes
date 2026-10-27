@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import hmac
+import re
 import io
 import json
 import logging
@@ -17,7 +18,7 @@ from fastapi import APIRouter, Body, Depends, FastAPI, HTTPException, Query, Req
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__, analysis
+from . import __version__, analysis, families, timeutil
 from . import geometry as geo
 from .auth import COOKIE, SESSION_MAX_AGE, Auth
 from .budget import Budget
@@ -99,6 +100,9 @@ class AppState:
 
     def startup(self) -> None:
         migrate(self.db, self.cfg.backup_dir)
+        n = families.backfill(self.db)  # stable route identities for existing geometries; no requests
+        if n:
+            log.info("assigned route families to %s stored geometries", n)
         if self.db.get_setting("first_period") is None:
             self.db.set_setting("first_period", self.budget().period().key)
         recover_after_restart(self.db, self.budget())
@@ -260,8 +264,11 @@ def create_app(cfg: Config | None = None, client=None, start_scheduler: bool = T
                     "tiles_available": cfg.map_tile_mode != "off" and (bool(cfg.tomtom_api_key) if cfg.map_tile_mode == "proxy" else bool(cfg.tomtom_map_key))},
             "directions": analysis.overview(db, cfg),
             "pending_drafts": db.scalar("SELECT COUNT(*) FROM corridors WHERE status='draft'"),
-            "open_deviations": db.scalar("SELECT COUNT(*) FROM observations WHERE deviation_flag=1 AND intended_utc > ?",
-                                         (iso(utcnow() - timedelta(days=7)),)),
+            # Distinct deviating routes (corridor x route family), not every repeated observation of the same detour.
+            "open_deviations": db.scalar(
+                "SELECT COUNT(*) FROM (SELECT DISTINCT o.corridor_id, v.family_id FROM observations o JOIN route_variants v ON v.id = o.variant_id "
+                "JOIN corridors c ON c.id = o.corridor_id WHERE o.deviation_flag = 1 AND c.hidden_utc IS NULL AND o.intended_utc > ?)",
+                (iso(utcnow() - timedelta(days=7)),)),
         })
 
     def _dir(direction_id: int) -> dict:
@@ -321,6 +328,11 @@ def create_app(cfg: Config | None = None, client=None, start_scheduler: bool = T
             f"GROUP BY v.id ORDER BY n DESC LIMIT 200", (direction_id, *params))
         return J({"variants": [{**dict(x), "roads": json.loads(x["roads_json"])} for x in rows]})
 
+    @r.get("/api/families", dependencies=[viewer])
+    def api_families(direction_id: int):
+        _dir(direction_id)
+        return J({"families": analysis.families(db, direction_id)})
+
     @r.get("/api/day", dependencies=[viewer])
     def api_day(direction_id: int, day: str | None = Query(None, alias="date"), extras: bool = False):
         _dir(direction_id)
@@ -363,7 +375,7 @@ def create_app(cfg: Config | None = None, client=None, start_scheduler: bool = T
 
     @r.get("/api/plan", dependencies=[viewer])
     def api_plan(direction_id: int, day: str = Query(..., alias="date"), arrive: str = "09:00", pct: int = 90, weeks: int = 12,
-                 min_samples: int = 4, same_weekday: bool = True, extras: bool = False):
+                 min_samples: int = 6, same_weekday: bool = True, extras: bool = False):
         _dir(direction_id)
         if pct not in (50, 75, 80, 90, 95):
             raise HTTPException(400, "pct must be one of 50, 75, 80, 90, 95")
@@ -384,6 +396,19 @@ def create_app(cfg: Config | None = None, client=None, start_scheduler: bool = T
         st = b.status(requests_per_cycle(db, cfg), collection_enabled(db, cfg))
         st["ledger"] = [dict(x) for x in db.all("SELECT id, purpose, outcome, counted, created_utc, sent_utc, completed_utc, http_status, "
                                                 "tracking_id, endpoint, cycle_id, note FROM request_ledger ORDER BY id DESC LIMIT 100")]
+        sch = state.scheduler
+        last = db.one("SELECT slot_utc, status, reason, attempted_requests FROM collection_cycles WHERE trigger='schedule' ORDER BY slot_utc DESC LIMIT 1")
+        recent = db.all("SELECT status, COUNT(*) n FROM collection_cycles WHERE trigger='schedule' AND slot_utc >= ? GROUP BY status",
+                        (iso(utcnow() - timedelta(hours=24)),))
+        st["schedule"] = {
+            "enabled": collection_enabled(db, cfg),
+            "thread_running": bool(sch and sch.thread and sch.thread.is_alive()),
+            "holds_lease": bool(sch and sch.active),
+            "last_heartbeat_utc": iso(sch.last_heartbeat) if sch and sch.last_heartbeat else None,
+            "next_slot_utc": iso(timeutil.next_slot(utcnow(), cfg.collection_interval_minutes)),
+            "last_cycle": dict(last) if last else None,
+            "last_24h": {r["status"]: r["n"] for r in recent},
+        }
         return J(st)
 
     @r.put("/api/budget", dependencies=[admin])
@@ -571,7 +596,10 @@ def create_app(cfg: Config | None = None, client=None, start_scheduler: bool = T
                 raise HTTPException(400, "name must be 1-80 characters")
             sets.append("name = ?"); vals.append(n)
         if "color" in payload:
-            sets.append("color = ?"); vals.append(str(payload["color"])[:20])
+            col = str(payload["color"]).strip()
+            if not re.fullmatch(r"#[0-9a-fA-F]{6}", col):
+                raise HTTPException(400, "color must be a hex colour like #1baf7a")
+            sets.append("color = ?"); vals.append(col)
         if "deviation_threshold_m" in payload:
             try:
                 t = int(payload["deviation_threshold_m"])
@@ -596,6 +624,12 @@ def create_app(cfg: Config | None = None, client=None, start_scheduler: bool = T
             db.execute(f"UPDATE corridors SET {', '.join(sets)}, updated_utc = ? WHERE id = ?", (*vals, iso(utcnow()), cid))
         return {"ok": True}
 
+    @r.get("/api/corridors/{cid}/deviations", dependencies=[viewer])
+    def api_corridor_deviations(cid: int):
+        c = _corridor(cid)
+        return J({"corridor_id": cid, "name": c["name"], "deviation_threshold_m": c["deviation_threshold_m"],
+                  "reference_variant_id": c["reference_variant_id"], "deviations": analysis.corridor_deviations(db, cid)})
+
     @r.post("/api/corridors/{cid}/preview", dependencies=[admin])
     def api_corridor_preview(cid: int):
         _corridor(cid)
@@ -619,7 +653,9 @@ def create_app(cfg: Config | None = None, client=None, start_scheduler: bool = T
     @r.post("/api/corridors/{cid}/retire", dependencies=[admin])
     def api_corridor_retire(cid: int):
         c = _corridor(cid)
-        db.execute("UPDATE corridors SET status='retired', updated_utc = ? WHERE id = ?", (iso(utcnow()), cid))
+        if c["status"] != "confirmed":
+            raise HTTPException(409, "Only confirmed corridors can be retired")
+        db.execute("UPDATE corridors SET status='retired', retired_utc = ?, updated_utc = ? WHERE id = ?", (iso(utcnow()), iso(utcnow()), cid))
         db.event("info", "corridor", f"Corridor '{c['name']}' retired; its history is kept.")
         return {"ok": True}
 
@@ -672,11 +708,13 @@ def create_app(cfg: Config | None = None, client=None, start_scheduler: bool = T
         end = datetime.combine(b + timedelta(days=1), datetime.min.time(), tzinfo=cfg.tz)
         cols = ["observation_id", "data_source", "cycle_id", "cycle_trigger", "cycle_status", "direction_id", "direction_code", "intended_utc",
                 "intended_local", "request_utc", "response_utc", "target", "role", "corridor_id", "corridor_name", "returned_index",
-                "variant_id", "resembles_corridor_id", "status", "failure_reason", "http_status", "distance_m", "travel_time_s",
+                "variant_id", "route_family_id", "monitored", "resembles_corridor_id", "status", "failure_reason", "http_status", "distance_m", "travel_time_s",
                 "traffic_delay_s", "free_flow_s", "historic_s", "live_s", "traffic_length_m", "departure_time", "arrival_time",
                 "deviation_flag", "deviation_share", "deviation_max_m", "tracking_id"]
-        q = ("SELECT o.*, c.trigger cycle_trigger, c.status cycle_status, d.code direction_code, cr.name corridor_name FROM observations o "
+        q = ("SELECT o.*, c.trigger cycle_trigger, c.status cycle_status, d.code direction_code, cr.name corridor_name, v.family_id route_family_id, "
+             "o.role IN ('recommended', 'corridor') monitored FROM observations o "
              "JOIN collection_cycles c ON c.id = o.cycle_id JOIN directions d ON d.id = o.direction_id LEFT JOIN corridors cr ON cr.id = o.corridor_id "
+             "LEFT JOIN route_variants v ON v.id = o.variant_id "
              "WHERE o.intended_utc >= ? AND o.intended_utc < ?" + (" AND o.direction_id = ?" if direction_id else "") + " ORDER BY o.intended_utc, o.id")
         params = (iso(start), iso(end), *( [direction_id] if direction_id else []))
 
@@ -716,7 +754,7 @@ def create_app(cfg: Config | None = None, client=None, start_scheduler: bool = T
             refs = db.one("SELECT COUNT(*) n, GROUP_CONCAT(DISTINCT role) roles, GROUP_CONCAT(DISTINCT corridor_id) corridors FROM observations WHERE variant_id = ?", (v["id"],))
             feats.append({"type": "Feature", "id": v["id"],
                           "geometry": {"type": "LineString", "coordinates": [[c[1], c[0]] for c in coords]},
-                          "properties": {"variant_id": v["id"], "direction_id": v["direction_id"], "direction_code": v["code"],
+                          "properties": {"variant_id": v["id"], "route_family_id": v["family_id"], "direction_id": v["direction_id"], "direction_code": v["code"],
                                          "fingerprint": v["fingerprint"], "length_m": v["length_m"], "point_count": v["point_count"],
                                          "roads": json.loads(v["roads_json"]), "first_seen_utc": v["first_seen_utc"],
                                          "last_seen_utc": v["last_seen_utc"], "observations": refs["n"], "roles": refs["roles"],
@@ -753,12 +791,13 @@ def create_app(cfg: Config | None = None, client=None, start_scheduler: bool = T
                                    "resembles": x["resembles"]["name"] if x.get("resembles") else None,
                                    "deviation_flag": bool(x["deviation_flag"])})
             ok = [x for x in routes if x["status"] == "ok" and x["travel_time_s"] is not None]
-            fastest = min(ok, key=lambda x: x["travel_time_s"]) if ok else None
+            # Only name a fastest route when the requests were close enough in time to compare.
+            fastest = min(ok, key=lambda x: x["travel_time_s"]) if ok and det["comparable"] else None
             rec = next((x for x in routes if x["key"] == "recommended"), None)
             out.append({"direction_id": d["id"], "code": d["code"], "name": d["name"],
                         "observed_utc": det["intended_utc"] if det else None,
                         "age_minutes": None if lt["age_s"] is None else round(lt["age_s"] / 60, 1),
-                        "stale": lt["stale"], "partial": lt["partial"],
+                        "stale": lt["stale"], "partial": lt["partial"], "comparable": bool(det and det["comparable"]),
                         "recommended_travel_time_min": rec["travel_time_min"] if rec else None,
                         "recommended_traffic_delay_min": None if not rec or rec["traffic_delay_s"] is None else round(rec["traffic_delay_s"] / 60, 1),
                         "recommended_resembles": rec["resembles"] if rec else None,

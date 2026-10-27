@@ -29,15 +29,29 @@ on time.
   sections TomTom reported *at that time*, never today's traffic.
 - **Analysis**: per direction, corridor, weekday, departure-time window and date range: median, mean, 90th percentile,
   traffic delay median and 90th percentile, time above free flow, observation count, coverage and missing rate,
-  how often each corridor is fastest, how often the recommendation changes. Day charts, recommendation timeline,
-  weekday × time heatmap.
-- **Plan a trip**: date and arrival time → recommended route and departure with a reliability margin, using
-  slot-specific historical distributions (durations are not assumed constant). Shows sample size, date range and
-  method, and an explicit "not enough data" state. An optional, separate, budgeted live check.
+  how often each corridor is fastest, how often the recommendation changes, a by-weekday table, with a sample-size
+  ("confidence") label on every row. Day charts, recommendation timeline, weekday × time heatmap.
+- **Show all collected routes** (one switch, remembered per browser, on Map, Analysis and Plan): also shows the extra
+  alternatives TomTom returned with the unrestricted request (one series per distinct route) and the routes TomTom
+  took when a corridor deviated (per deviating route). These reuse stored data, never cost a request, are drawn
+  dashed, are labelled *not monitored*, show their coverage and sample size, never compete for "fastest" and are
+  never recommended by the planner. An alternative that is the same route as a monitored corridor is not counted
+  a second time; deviating variants are a breakdown of the corridor's own samples, not extra samples.
+- **Plan a trip**: date and arrival time → latest departure and route that arrive on time at the chosen reliability,
+  using slot-specific historical distributions (durations are not assumed constant). Answers how often that
+  departure arrived on time (k of n days), how much buffer to add to the typical time, whether leaving 15 or 30
+  minutes earlier helps, and which monitored corridor is fastest and most reliable at that time. Shows sample size,
+  coverage, date range and method, and an explicit "not enough data" state (at least 6 observations per slot).
+  An optional, separate, budgeted live check.
 - **Setup**: editable journey, per-direction collection switch, corridor drafts from map clicks (via points) or from
-  a route TomTom already returned (exact geometry), preview on the map (one request), confirm, retire.
+  a route TomTom already returned (exact geometry), preview on the map (one request), confirm, edit (name, colour,
+  deviation tolerance, note), retire, hide, show again, delete permanently (only after typing the name). Each corridor
+  shows its tolerance; **Inspect deviations** lists every distinct route TomTom took instead and compares it with the
+  confirmed geometry on the map. **Distinct routes collected** lists every route family with where it was seen.
 - **Budget**: request ledger, routing/map/traffic counters, allowance, safety reserve, other-apps reserve, opening
-  usage, warning threshold, hard ceiling, forecast, pause reason and automatic resumption after the reset.
+  usage, warning threshold, hard ceiling, forecast, spare requests after the remaining schedule, counted requests
+  per day (scheduled vs. retries/manual/previews), scheduler status (running, next slot, last slot, last 24 hours),
+  pause reason and automatic resumption after the reset.
 - **Exports**: CSV of every observation (including failures) and GeoJSON of all saved route geometries.
 - **Home Assistant**: iframe-friendly dashboard for a landscape tablet, read-only REST API and sensor examples.
 
@@ -63,9 +77,14 @@ See [docs/TOMTOM.md](docs/TOMTOM.md) for the full budget calculation (including 
   were never sent (budget protection) as explicit failed observations. Missing values stay NULL; a real 0 stays 0.
 - Request and response timestamps are stored separately. Routes from one cycle are compared only when their
   responses arrived within `COMPARISON_TOLERANCE_SECONDS` (120) of each other.
-- Route identity never depends on response order. The recommendation is matched to corridors by geometry similarity,
-  and geometry is stored once per distinct variant (SHA-256 of the exact coordinates, compressed) and referenced by
-  every observation. Corridor routes that stray from their confirmed geometry are flagged for inspection.
+- Route identity never depends on response order. Geometry is stored once per distinct variant (SHA-256 of the exact
+  coordinates, compressed) and referenced by every observation. Variants that follow the same roads (97 % of each
+  within 150 m of the other, lengths within 5 %) form one **route family** with a stable number, so tiny coordinate
+  differences do not create new routes. The recommendation is matched to corridors by geometry similarity.
+- Corridor routes that stray from their confirmed geometry are flagged for inspection when more than 5 % *and* at
+  least 500 m of the route lies beyond the corridor's tolerance (default 400 m, adjustable per corridor), or the
+  length differs by more than 15 %. One event is written per new deviating route family, not per observation.
+- A corridor is expected (and counted as missing when absent) from its confirmation until it is retired.
 
 ### Private journey setup
 
@@ -145,7 +164,7 @@ is labelled as demo data. Live and demo data never mix.
 | `ROUTING_SAFETY_RESERVE` | `2000` | Kept unused. |
 | `ROUTING_OTHER_APPS_ALLOWANCE` | `0` | Reserved for other apps on the same key. |
 | `ROUTING_OPENING_USAGE` | `0` | Usage before this app started, for the first period. |
-| `ROUTING_HARD_CEILING` | `0` | Override the computed ceiling (allowance − reserve − other apps). |
+| `ROUTING_HARD_CEILING` | `0` | Replaces the computed ceiling (allowance − reserve − other apps); never above allowance − other apps. |
 | `ROUTING_WARNING_PERCENT` | `80` | Warning threshold; above it, no automatic retries. |
 | `ALLOWANCE_PERIOD` | `monthly` | `monthly` or `daily`. |
 | `ALLOWANCE_RESET_TIMEZONE` | `UTC` | Timezone of the provider's reset (not the UI timezone). |
@@ -189,8 +208,9 @@ All state is in the volume: `/data/routes.sqlite` (or `demo.sqlite`) plus `/data
   `docker run --rm -v 8star-routes_routes-data:/data -v "$PWD":/in alpine cp /in/<file> /data/backups/`
   (the volume name is prefixed with your stack name).
 - **Whole volume**: `docker run --rm -v 8star-routes_routes-data:/data -v "$PWD":/out alpine tar czf /out/routes-data.tgz -C /data .`
-- **Upgrades**: redeploy. Migrations run on start, each in a transaction, after a backup. If one fails, the app does
-  not start and the data is unchanged.
+- **Upgrades**: see [docs/UPGRADING.md](docs/UPGRADING.md) for the exact Dockhand steps, a dry run against a copy
+  of the live database (`scripts/check_upgrade.py`) and two verified rollback paths. Migrations run on start, each in
+  a transaction, after a backup. If one fails, the app does not start and the data is unchanged.
 
 ## Storage expectations
 
@@ -212,12 +232,14 @@ All JSON responses include `data_source` (`live` or `demo`). GET endpoints need 
 | `GET /api/v1/latest/{outbound\|return}` | One direction, flat fields. |
 | `GET /api/latest?direction_id=` | Latest cycle in full detail. |
 | `GET /api/cycles/{id}?direction_id=` | A historical cycle with previous/next and geometry changes. |
-| `GET /api/day?direction_id=&date=` | Every slot of a local day, including missing ones. |
+| `GET /api/day?direction_id=&date=&extras=true` | Every slot of a local day, including missing ones. |
 | `GET /api/stats?direction_id=&from=&to=&weekdays=0,1&time_from=07:00&time_to=09:00` | Comparison statistics. |
 | `GET /api/heatmap?direction_id=&key=recommended&metric=travel_time_s&bucket=30` | Weekday × time medians. |
 | `GET /api/plan?direction_id=&date=&arrive=09:00&pct=90&weeks=12` | Departure planning. |
-| `GET /api/variants/{id}` | Saved geometry of a route variant. |
-| `GET /api/budget` | Ledger, counters, forecast. |
+| `GET /api/variants/{id}` | Saved geometry of a route variant (with its route family). |
+| `GET /api/families?direction_id=` | Distinct routes (families) with where they were observed. |
+| `GET /api/corridors/{id}/deviations` | Deviating routes of a corridor, grouped by route family. |
+| `GET /api/budget` | Ledger, counters, forecast, daily usage, scheduler status. |
 | `GET /api/export/observations.csv` · `GET /api/export/geometries.geojson` | Exports. |
 | `GET /healthz` | Health (no auth): database, scheduler, last slot. |
 
@@ -231,7 +253,7 @@ Home Assistant iframe, dashboard and REST sensor examples: [docs/HOME_ASSISTANT.
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements-dev.txt
-pytest                                           # 59 tests, no network
+pytest                                           # 73 tests, no network
 APP_MODE=demo APP_PASSWORD=dev-password-1 python -m app   # http://localhost:8080
 ```
 

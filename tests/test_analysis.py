@@ -149,19 +149,21 @@ def test_extras_show_alternatives_and_deviating_routes_without_changing_corridor
     full = analysis.stats(env.db, env.cfg, 1, day, day, extras=True)
     assert [r["key"] for r in plain["routes"]] == ["recommended", "corridor:1", "corridor:2"]
     r = {x["key"]: x for x in full["routes"]}
-    assert set(r) == {"recommended", "corridor:1", "corridor:2", "dev:2", "alt:2"}
+    dev_key = next(k for k in r if k.startswith("dev:2:"))
+    # The a12 alternative is the same route as corridor 2, so it is not counted a second time.
+    assert set(r) == {"recommended", "corridor:1", "corridor:2", dev_key}
     # Corridor rows are identical with or without the extras.
     for k in ("recommended", "corridor:1", "corridor:2"):
         p = next(x for x in plain["routes"] if x["key"] == k)
         assert (p["ok"], p["fastest_count"], p["travel_time_s"]) == (r[k]["ok"], r[k]["fastest_count"], r[k]["travel_time_s"])
-    alt, dev = r["alt:2"], r["dev:2"]
-    assert alt["kind"] == "alternative" and alt["dashed"] and "not monitored" in alt["name"]
-    assert alt["expected"] == 96 and 0 < alt["ok"] < 96 and alt["failed"] == 0 and alt["fastest_share"] is None
-    assert dev["kind"] == "deviation" and 0 < dev["ok"] < r["corridor:2"]["ok"]
+    dev = r[dev_key]
+    assert dev["kind"] == "deviation" and dev["dashed"] and dev["subset_of"] == "corridor:2" and 0 < dev["ok"] < r["corridor:2"]["ok"]
     assert dev["ok"] == env.db.scalar("SELECT COUNT(*) FROM observations WHERE corridor_id = 2 AND deviation_flag = 1")
     ds = analysis.day_series(env.db, env.cfg, 1, day, extras=True)
-    assert {x["key"] for x in ds["routes"]} >= {"alt:2", "dev:2"}
-    assert any("alt:2" in s["routes"] for s in ds["slots"]) and not all("alt:2" in s["routes"] for s in ds["slots"] if s["cycle_id"])
-    hm = analysis.heatmap(env.db, env.cfg, 1, "alt:2", day, day)
-    assert sum(c["n"] for c in hm["cells"]) == alt["ok"]
-    assert "alt:2" not in {x["key"] for x in analysis.day_series(env.db, env.cfg, 1, day)["routes"]}
+    assert dev_key in {x["key"] for x in ds["routes"]}
+    assert any(dev_key in s["routes"] for s in ds["slots"]) and not all(dev_key in s["routes"] for s in ds["slots"] if s["cycle_id"])
+    hm = analysis.heatmap(env.db, env.cfg, 1, dev_key, day, day)
+    assert sum(c["n"] for c in hm["cells"]) == dev["ok"]
+    assert dev_key not in {x["key"] for x in analysis.day_series(env.db, env.cfg, 1, day)["routes"]}
+    det = analysis.cycle_detail(env.db, env.cfg, env.db.scalar("SELECT MAX(cycle_id) FROM observations WHERE role='alternative'"), 1)
+    assert next(x for x in det["routes"] if x["role"] == "alternative")["duplicate_of"]["key"] == "corridor:2"

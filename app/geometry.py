@@ -160,24 +160,34 @@ class Deviation:
     max_m: float
     length_ratio: float
     flagged: bool
+    outside_m: float = 0.0  # approximate length of route beyond the threshold
+
+
+DEVIATION_SAMPLE_M = 100
+DEVIATION_MIN_OUTSIDE_M = 500
 
 
 def deviation(route: list[list[float]], reference: list[list[float]], threshold_m: float,
-              share_limit: float = 0.05, length_tolerance: float = 0.15) -> Deviation:
+              share_limit: float = 0.05, length_tolerance: float = 0.15,
+              min_outside_m: float = DEVIATION_MIN_OUTSIDE_M) -> Deviation:
     """How far `route` strays from `reference`.
 
-    Flagged when more than `share_limit` of the route lies beyond `threshold_m`
-    from the reference, or the length differs by more than `length_tolerance`.
+    Flagged when more than `share_limit` of the route, and at least `min_outside_m`
+    of it, lies beyond `threshold_m` from the reference, or when the length differs
+    by more than `length_tolerance`. The minimum stretch keeps short, harmless
+    geometry differences (a ramp, a parallel service road) from raising alerts.
     """
     if len(route) < 2 or len(reference) < 2:
         return Deviation(1.0, math.inf, 0.0, True)
     idx = index_for(reference)
-    sample = resample(route, 100)
+    sample = resample(route, DEVIATION_SAMPLE_M)
     dists = [idx.distance(p) for p in sample]
-    outside = sum(1 for d in dists if d > threshold_m) / len(dists)
+    n_out = sum(1 for d in dists if d > threshold_m)
+    outside = n_out / len(dists)
+    outside_m = n_out * DEVIATION_SAMPLE_M  # samples are at least this far apart; spikes are not over-counted
     lr = length_m(route) / max(1.0, length_m(reference))
-    flagged = outside > share_limit or abs(lr - 1) > length_tolerance
-    return Deviation(outside, max(dists), lr, flagged)
+    flagged = (outside > share_limit and outside_m >= min_outside_m) or abs(lr - 1) > length_tolerance
+    return Deviation(outside, max(dists), lr, flagged, outside_m)
 
 
 def similarity(a: list[list[float]], b: list[list[float]], threshold_m: float = 250.0) -> float:
