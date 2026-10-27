@@ -20,6 +20,7 @@ from .config import Config
 from .db import Database, iso, parse_iso, utcnow
 
 RECOMMENDED_COLOR = "#2a78d6"
+ALTERNATIVE_COLOR = "#868e96"
 _same_route_cache: dict[tuple[int, int], bool] = {}
 
 
@@ -39,20 +40,77 @@ def _corridor_map(db: Database, direction_id: int) -> dict[int, dict]:
     return {c["id"]: c for c in corridor_rows(db, direction_id, ("draft", "confirmed", "retired"), include_hidden=True)}
 
 
-def route_key(obs) -> str | None:
+def route_key(obs, extras: bool = False) -> str | None:
+    """Series key of an observation. Extra extras only get one when asked for.
+
+    Alternatives have no corridor of their own, so they are grouped by the corridor
+    they resemble ("alt:<corridor id>"), or "alt:other" when they match none.
+    """
     if obs["role"] == "recommended":
         return "recommended"
     if obs["role"] == "corridor":
         return f"corridor:{obs['corridor_id']}"
+    if extras and obs["role"] == "alternative":
+        return f"alt:{obs['resembles_corridor_id']}" if obs["resembles_corridor_id"] else "alt:other"
     return None
 
 
-def route_labels(db: Database, direction_id: int) -> list[dict]:
+def _cycle_obs(rows, extras: bool = False) -> dict:
+    """Observations of one cycle by series key.
+
+    Several extras can share a key; the fastest successful one wins. With extra routes
+    switched on, a corridor observation that deviated from its confirmed geometry also appears
+    as "dev:<corridor id>"; it stays in its corridor's own series as well.
+    """
+    out: dict = {}
+    for o in rows:
+        k = route_key(o, extras)
+        if k is None:
+            continue
+        cur = out.get(k)
+        if cur is None or (k.startswith("alt:") and _alt_rank(o) < _alt_rank(cur)):
+            out[k] = o
+        if extras and o["role"] == "corridor" and o["deviation_flag"]:
+            out[f"dev:{o['corridor_id']}"] = o
+    return out
+
+
+def _alt_rank(o) -> tuple:
+    ok = o["status"] == "ok" and o["travel_time_s"] is not None
+    return (0, o["travel_time_s"]) if ok else (1, 0)
+
+
+def extra_label(key: str, corridors: dict[int, dict]) -> dict:
+    c = corridors.get(int(key.split(":")[1])) if key != "alt:other" else None
+    if key.startswith("dev:"):
+        return {"key": key, "name": f"{c['name'] if c else 'Deleted corridor'} · deviating route (not the confirmed geometry)",
+                "color": c["color"] if c else ALTERNATIVE_COLOR, "kind": "deviation", "dashed": True}
+    name = (f"Alternative resembling {c['name']}" + (" (hidden corridor)" if c.get("hidden_utc") else "")) if c \
+        else "Other alternative (no matching corridor)"
+    return {"key": key, "name": name + " (not monitored)", "color": c["color"] if c else ALTERNATIVE_COLOR,
+            "kind": "alternative", "dashed": True}
+
+
+def route_labels(db: Database, direction_id: int, extra_keys=()) -> list[dict]:
     out = [{"key": "recommended", "name": "TomTom recommendation", "color": RECOMMENDED_COLOR, "kind": "unrestricted"}]
     for c in corridor_rows(db, direction_id, ("confirmed", "retired")):
         out.append({"key": f"corridor:{c['id']}", "name": c["name"], "color": c["color"], "kind": "corridor",
                     "method": c["method"], "status": c["status"]})
+    if extra_keys:
+        corridors = _corridor_map(db, direction_id)
+        order = {l["key"].split(":")[-1]: i for i, l in enumerate(out)}
+        for k in sorted(set(extra_keys), key=lambda k: (k.split(":")[0] != "dev", order.get(k.split(":")[1], len(out)), k)):
+            out.append(extra_label(k, corridors))
     return out
+
+
+def _extra_keys(by_cycle, extras: bool) -> set[str]:
+    if not extras:
+        return set()
+    keys = set()
+    for rows in by_cycle.values():
+        keys.update(k for k in _cycle_obs(rows, True) if k.startswith(("alt:", "dev:")))
+    return keys
 
 
 def same_route(db: Database, v1: int | None, v2: int | None) -> bool:
@@ -80,7 +138,10 @@ def _obs_dict(o, corridors: dict[int, dict]) -> dict:
     elif o["role"] == "recommended":
         d["name"], d["color"] = "TomTom recommendation", RECOMMENDED_COLOR
     else:
-        d["name"], d["color"] = f"TomTom alternative (returned #{o['returned_index']})", "#868e96"
+        d["name"], d["color"] = f"TomTom alternative (returned #{o['returned_index']})", ALTERNATIVE_COLOR
+        d["series_key"] = route_key(o, True)
+        rc = corridors.get(o["resembles_corridor_id"]) if o["resembles_corridor_id"] else None
+        d["series_color"] = rc["color"] if rc else ALTERNATIVE_COLOR
     rc = corridors.get(o["resembles_corridor_id"]) if o["resembles_corridor_id"] else None
     d["resembles"] = {"corridor_id": rc["id"], "name": rc["name"], "score": o["resembles_score"]} if rc else None
     return d
@@ -171,23 +232,24 @@ def latest(db: Database, cfg: Config, direction_id: int, now: datetime | None = 
     }
 
 
-def _scheduled_rows(db: Database, direction_id: int, start: datetime, end: datetime):
+def _scheduled_rows(db: Database, direction_id: int, start: datetime, end: datetime, extras: bool = False):
     cycles = db.all("SELECT id, slot_utc, status, reason FROM collection_cycles WHERE trigger='schedule' AND slot_utc >= ? AND slot_utc < ? "
                     "ORDER BY slot_utc", (iso(start), iso(end)))
+    roles = "('recommended', 'corridor', 'alternative')" if extras else "('recommended', 'corridor')"
     obs = db.all(
         "SELECT o.* FROM observations o JOIN collection_cycles c ON c.id = o.cycle_id WHERE c.trigger='schedule' AND o.direction_id = ? "
-        "AND c.slot_utc >= ? AND c.slot_utc < ? AND o.role IN ('recommended', 'corridor')", (direction_id, iso(start), iso(end)))
+        f"AND c.slot_utc >= ? AND c.slot_utc < ? AND o.role IN {roles}", (direction_id, iso(start), iso(end)))
     by_cycle: dict[int, list] = defaultdict(list)
     for o in obs:
         by_cycle[o["cycle_id"]].append(o)
     return cycles, by_cycle
 
 
-def day_series(db: Database, cfg: Config, direction_id: int, day: date) -> dict:
+def day_series(db: Database, cfg: Config, direction_id: int, day: date, extras: bool = False) -> dict:
     """Every expected slot of a local day with each route's values (or why it is missing)."""
     tz = cfg.tz
     start, end = timeutil.local_day_bounds(day, tz)
-    cycles, by_cycle = _scheduled_rows(db, direction_id, start, end)
+    cycles, by_cycle = _scheduled_rows(db, direction_id, start, end, extras)
     by_slot = {c["slot_utc"]: c for c in cycles}
     slots = []
     prev_rec = None
@@ -198,8 +260,7 @@ def day_series(db: Database, cfg: Config, direction_id: int, day: date) -> dict:
                  "cycle_status": c["status"] if c else ("future" if s > utcnow() else "no_record"),
                  "cycle_reason": c["reason"] if c else None, "routes": {}, "recommendation": None, "recommendation_changed": False}
         if c:
-            for o in by_cycle.get(c["id"], []):
-                rk = route_key(o)
+            for rk, o in _cycle_obs(by_cycle.get(c["id"], []), extras).items():
                 entry["routes"][rk] = {"status": o["status"], "travel_time_s": o["travel_time_s"], "traffic_delay_s": o["traffic_delay_s"],
                                        "free_flow_s": o["free_flow_s"], "distance_m": o["distance_m"], "failure_reason": o["failure_reason"],
                                        "deviation_flag": o["deviation_flag"], "variant_id": o["variant_id"]}
@@ -209,8 +270,8 @@ def day_series(db: Database, cfg: Config, direction_id: int, day: date) -> dict:
                         entry["recommendation_changed"] = True
                     prev_rec = o
         slots.append(entry)
-    return {"date": day.isoformat(), "timezone": cfg.timezone, "slots": slots, "routes": route_labels(db, direction_id),
-            "slot_count": len(slots)}
+    return {"date": day.isoformat(), "timezone": cfg.timezone, "slots": slots,
+            "routes": route_labels(db, direction_id, _extra_keys(by_cycle, extras)), "slot_count": len(slots)}
 
 
 def _filters_match(dt_utc: datetime, tz, weekdays: set[int] | None, t_from: int | None, t_to: int | None) -> bool:
@@ -233,13 +294,13 @@ def _summ(values: list[int]) -> dict:
 
 
 def stats(db: Database, cfg: Config, direction_id: int, start_day: date, end_day: date,
-          weekdays: set[int] | None = None, t_from: int | None = None, t_to: int | None = None) -> dict:
+          weekdays: set[int] | None = None, t_from: int | None = None, t_to: int | None = None, extras: bool = False) -> dict:
     tz = cfg.tz
     start, _ = timeutil.local_day_bounds(start_day, tz)
     _, end = timeutil.local_day_bounds(end_day, tz)
     end = min(end, utcnow())
-    cycles, by_cycle = _scheduled_rows(db, direction_id, start, end)
-    labels = route_labels(db, direction_id)
+    cycles, by_cycle = _scheduled_rows(db, direction_id, start, end, extras)
+    labels = route_labels(db, direction_id, _extra_keys(by_cycle, extras))
     corr = {f"corridor:{c['id']}": c for c in corridor_rows(db, direction_id, ("confirmed", "retired"))}
     recorded = {c["slot_utc"]: c for c in cycles}
     first = db.scalar("SELECT MIN(slot_utc) FROM collection_cycles WHERE trigger='schedule'")
@@ -255,7 +316,7 @@ def stats(db: Database, cfg: Config, direction_id: int, start_day: date, end_day
         k = iso(s)
         c = recorded.get(k)
         cycle_status[c["status"] if c else "no_record"] += 1
-        obs = {route_key(o): o for o in by_cycle.get(c["id"], [])} if c else {}
+        obs = _cycle_obs(by_cycle.get(c["id"], []), extras) if c else {}
         expected_now = set()
         for key, a in acc.items():
             if key.startswith("corridor:"):
@@ -316,6 +377,14 @@ def stats(db: Database, cfg: Config, direction_id: int, start_day: date, end_day
     routes = []
     for l in labels:
         a = acc[l["key"]]
+        if l["kind"] in ("alternative", "deviation"):
+            # Opportunistic: only present in some cycles, and never competes for "fastest".
+            routes.append({**l, "expected": a["expected"], "ok": a["ok"], "failed": a["failed"], "not_collected": a["not_collected"],
+                           "coverage": a["ok"] / a["expected"] if a["expected"] else None, "missing_rate": None,
+                           "travel_time_s": _summ(a["travel"]), "traffic_delay_s": _summ(a["delay"]),
+                           "excess_over_free_flow_s": _summ(a["excess"]), "fastest_count": None, "fastest_basis": None,
+                           "fastest_share": None, "no_data_in_compared_cycles": None})
+            continue
         routes.append({**l, "expected": a["expected"], "ok": a["ok"], "failed": a["failed"], "not_collected": a["not_collected"],
                        "coverage": a["ok"] / a["expected"] if a["expected"] else None,
                        "missing_rate": 1 - a["ok"] / a["expected"] if a["expected"] else None,
@@ -338,7 +407,12 @@ def stats(db: Database, cfg: Config, direction_id: int, start_day: date, end_day
         "method": "Scheduled cycles only. Percentiles use linear interpolation. Coverage = successful observations / expected slots; "
                   "failed and missing slots count against coverage and are never treated as zero. 'Fastest' compares routes "
                   "from the same cycle only, when their responses arrived within the comparison tolerance. For corridors it is 'fastest of all expected "
-                  "corridors'; when a corridor has no data the cycle is undetermined and nobody wins it; for the recommendation it is 'faster than every corridor by more than a minute' (TomTom found a better road).",
+                  "corridors'; when a corridor has no data the cycle is undetermined and nobody wins it; for the recommendation it is 'faster than every corridor by more than a minute' (TomTom found a better road)."
+                  + (" Deviating routes are corridor observations whose geometry strayed beyond the corridor's tolerance; they also "
+                     "remain in their corridor's own row." if extras else "")
+                  + (" Alternatives are the extra routes TomTom returned with the unrestricted request, grouped by the corridor they resemble "
+                     "(the fastest one per cycle when several match). They are not monitored: coverage shows how often TomTom offered one, "
+                     "a slot without one is 'not returned', not a failure, and they never count for 'fastest'." if extras else ""),
     }
 
 
@@ -347,16 +421,17 @@ def heatmap(db: Database, cfg: Config, direction_id: int, key: str, start_day: d
     tz = cfg.tz
     start, _ = timeutil.local_day_bounds(start_day, tz)
     _, end = timeutil.local_day_bounds(end_day, tz)
-    cycles, by_cycle = _scheduled_rows(db, direction_id, start, end)
+    extras = key.startswith(("alt:", "dev:"))
+    cycles, by_cycle = _scheduled_rows(db, direction_id, start, end, extras)
     cells: dict[tuple[int, int], list[int]] = defaultdict(list)
     expected: dict[tuple[int, int], int] = defaultdict(int)
     for c in cycles:
         s = parse_iso(c["slot_utc"]).astimezone(tz)
         cell = (s.weekday(), (s.hour * 60 + s.minute) // bucket_minutes)
         expected[cell] += 1
-        for o in by_cycle.get(c["id"], []):
-            if route_key(o) == key and o["status"] == "ok" and o[metric] is not None:
-                cells[cell].append(o[metric])
+        o = _cycle_obs(by_cycle.get(c["id"], []), extras).get(key)
+        if o is not None and o["status"] == "ok" and o[metric] is not None:
+            cells[cell].append(o[metric])
     out = []
     for (wd, b), n in sorted(expected.items()):
         v = cells.get((wd, b), [])
@@ -366,7 +441,8 @@ def heatmap(db: Database, cfg: Config, direction_id: int, key: str, start_day: d
 
 
 def plan_arrival(db: Database, cfg: Config, direction_id: int, day: date, arrive_minute: int, pct: int = 90,
-                 weeks: int = 12, min_samples: int = 4, window_minutes: int = 180, same_weekday: bool = True) -> dict:
+                 weeks: int = 12, min_samples: int = 4, window_minutes: int = 180, same_weekday: bool = True,
+                 extras: bool = False) -> dict:
     """Latest departure per route whose `pct`-percentile historical arrival meets the target."""
     tz = cfg.tz
     today = utcnow().astimezone(tz).date()
@@ -381,7 +457,7 @@ def plan_arrival(db: Database, cfg: Config, direction_id: int, day: date, arrive
     target_utc = target_local.astimezone(timezone.utc)
     hist_end = min(utcnow(), datetime.combine(day, datetime.min.time(), tzinfo=tz).astimezone(timezone.utc))
     hist_start = hist_end - timedelta(weeks=weeks)
-    cycles, by_cycle = _scheduled_rows(db, direction_id, hist_start, hist_end)
+    cycles, by_cycle = _scheduled_rows(db, direction_id, hist_start, hist_end, extras)
     weekday = day.weekday()
     samples: dict[tuple[str, int], list[int]] = defaultdict(list)
     failures: dict[tuple[str, int], int] = defaultdict(int)
@@ -393,14 +469,13 @@ def plan_arrival(db: Database, cfg: Config, direction_id: int, day: date, arrive
         if not same_weekday and (s.weekday() < 5) != (weekday < 5):
             continue
         m = s.hour * 60 + s.minute
-        for o in by_cycle.get(c["id"], []):
-            k = route_key(o)
+        for k, o in _cycle_obs(by_cycle.get(c["id"], []), extras).items():
             if o["status"] == "ok" and o["travel_time_s"] is not None:
                 samples[(k, m)].append(o["travel_time_s"])
                 dates_used.add(s.date().isoformat())
             else:
                 failures[(k, m)] += 1
-    labels = route_labels(db, direction_id)
+    labels = route_labels(db, direction_id, _extra_keys(by_cycle, extras))
     step = cfg.collection_interval_minutes
     candidates = []
     for m in range(arrive_minute - window_minutes, arrive_minute + 1, step):
@@ -440,7 +515,10 @@ def plan_arrival(db: Database, cfg: Config, direction_id: int, day: date, arrive
     else:
         state = "ok"
         best = max(viable, key=lambda r: (r["latest_departure"]["minute"], -r["latest_departure"]["median_s"]))
-        rec = {"key": best["key"], "name": best["name"], **best["latest_departure"]}
+        rec = {"key": best["key"], "name": best["name"], "kind": best["kind"], **best["latest_departure"]}
+        if best["kind"] in ("alternative", "deviation"):
+            notes.append("The best option is a route that is not monitored every cycle (an extra TomTom alternative or a deviating corridor route), "
+                         "so its history has gaps whenever TomTom did not return it.")
     return {
         "state": state, "recommendation": rec, "routes": per_route, "notes": notes,
         "target_arrival_local": target_local.isoformat(timespec="minutes"),

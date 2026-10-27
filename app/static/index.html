@@ -67,6 +67,7 @@
           <div class="card">
             <div id="m-stamp" class="stamp">No observation loaded</div>
             <div id="m-flags" class="tags row" style="margin-top:6px"></div>
+            <div class="row" style="margin-top:6px"><label class="row extras-label" style="gap:6px" title="Also show routes that are already collected anyway: the extra alternatives TomTom returns with the unrestricted request, and corridor observations that deviated from their confirmed geometry. No extra requests."><input type="checkbox" class="extras-toggle" id="m-extras"> Show all collected routes</label></div>
             <p class="small muted" style="margin:8px 0 0">Values are TomTom <b>estimates</b> at the time of observation, not measured journeys.
               “Traffic delay” is TomTom’s reported delay field.</p>
           </div>
@@ -92,6 +93,7 @@
             <div class="chips" id="a-weekdays"></div></div>
           <div class="field"><label for="a-tfrom">Departure between</label>
             <div class="row" style="gap:4px"><input type="time" id="a-tfrom" step="900"><span>–</span><input type="time" id="a-tto" step="900"></div></div>
+          <div class="field"><label>Routes</label><label class="row extras-label" style="gap:6px" title="Also show routes that are already collected anyway: the extra alternatives TomTom returns with the unrestricted request, and corridor observations that deviated from their confirmed geometry. No extra requests."><input type="checkbox" class="extras-toggle" id="a-extras"> Show all collected routes</label></div>
           <button id="a-apply" class="primary">Apply</button>
         </div>
       </div>
@@ -140,6 +142,7 @@
             <select id="p-weeks"><option value="12">12 weeks</option><option value="4">4 weeks</option><option value="8">8 weeks</option><option value="26">26 weeks</option></select></div>
           <div class="field"><label for="p-match">Compare with</label>
             <select id="p-match"><option value="1">Same weekday</option><option value="0">All weekdays / weekend days</option></select></div>
+          <div class="field"><label>Routes</label><label class="row extras-label" style="gap:6px" title="Also show routes that are already collected anyway: the extra alternatives TomTom returns with the unrestricted request, and corridor observations that deviated from their confirmed geometry. No extra requests."><input type="checkbox" class="extras-toggle" id="p-extras"> Show all collected routes</label></div>
           <button id="p-go" class="primary">Plan</button>
         </div>
       </div>

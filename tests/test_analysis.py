@@ -128,3 +128,40 @@ def test_latest_reads_stored_data_only(env):
     lt = analysis.latest(env.db, env.cfg, 1, now=env.clock())
     assert lt["detail"]["routes"]
     assert len(env.client.calls) == n
+
+
+def test_extras_show_alternatives_and_deviating_routes_without_changing_corridor_stats(env):
+    outbound_only(env.db)
+    confirm_corridors(env.db, env.clock)
+
+    def script(req, n):
+        if req.target == "unrestricted":
+            routes = [tt_route(shape_coords("a4", True), 1500, 0, 1440)]
+            if n % 2 == 0:  # TomTom offers the a12 road as an extra alternative in half the cycles
+                routes.append(tt_route(shape_coords("a12", True), 1550, 20, 1440))
+            return env.client.ok(routes)
+        if req.corridor_id == 2:
+            return env.client.ok([tt_route(shape_coords("a12", True, detour=n % 4 == 1), 1600, 30)])
+        return env.client.ok([tt_route(shape_coords("n470", True), 1400, 0)])
+    collect_days(env, 1, script)
+    day = date(2026, 9, 22)
+    plain = analysis.stats(env.db, env.cfg, 1, day, day)
+    full = analysis.stats(env.db, env.cfg, 1, day, day, extras=True)
+    assert [r["key"] for r in plain["routes"]] == ["recommended", "corridor:1", "corridor:2"]
+    r = {x["key"]: x for x in full["routes"]}
+    assert set(r) == {"recommended", "corridor:1", "corridor:2", "dev:2", "alt:2"}
+    # Corridor rows are identical with or without the extras.
+    for k in ("recommended", "corridor:1", "corridor:2"):
+        p = next(x for x in plain["routes"] if x["key"] == k)
+        assert (p["ok"], p["fastest_count"], p["travel_time_s"]) == (r[k]["ok"], r[k]["fastest_count"], r[k]["travel_time_s"])
+    alt, dev = r["alt:2"], r["dev:2"]
+    assert alt["kind"] == "alternative" and alt["dashed"] and "not monitored" in alt["name"]
+    assert alt["expected"] == 96 and 0 < alt["ok"] < 96 and alt["failed"] == 0 and alt["fastest_share"] is None
+    assert dev["kind"] == "deviation" and 0 < dev["ok"] < r["corridor:2"]["ok"]
+    assert dev["ok"] == env.db.scalar("SELECT COUNT(*) FROM observations WHERE corridor_id = 2 AND deviation_flag = 1")
+    ds = analysis.day_series(env.db, env.cfg, 1, day, extras=True)
+    assert {x["key"] for x in ds["routes"]} >= {"alt:2", "dev:2"}
+    assert any("alt:2" in s["routes"] for s in ds["slots"]) and not all("alt:2" in s["routes"] for s in ds["slots"] if s["cycle_id"])
+    hm = analysis.heatmap(env.db, env.cfg, 1, "alt:2", day, day)
+    assert sum(c["n"] for c in hm["cells"]) == alt["ok"]
+    assert "alt:2" not in {x["key"] for x in analysis.day_series(env.db, env.cfg, 1, day)["routes"]}

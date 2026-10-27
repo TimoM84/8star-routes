@@ -8,6 +8,7 @@ const S = {
   map: null, mapLayers: null, trafficLayer: null, trafficTimer: null,
   mode: "current", direction: null, cycleId: null, day: null, daySlots: null,
   highlight: null,
+  extras: (() => { try { return localStorage.getItem("routes.extras") === "1"; } catch { return false; } })(),
   setupMap: null, setupLayers: null, draft: null,
 };
 
@@ -24,7 +25,7 @@ async function boot() {
   badge.className = "badge " + (RT.meta.mode === "demo" ? "demo" : "live");
   for (const sel of ["m-direction", "a-direction", "p-direction"]) fillDirections($(sel));
   S.direction = RT.meta.directions.find(d => d.enabled)?.id || RT.meta.directions[0]?.id;
-  wireMap(); wireAnalysis(); wirePlan();
+  wireMap(); wireAnalysis(); wirePlan(); wireExtras();
   window.addEventListener("hashchange", route);
   route();
   renderBanners();
@@ -80,6 +81,22 @@ function renderBanners() {
   if (m.pending_drafts) b.appendChild(el("div.banner.info", `${m.pending_drafts} corridor draft(s) wait for inspection in Setup. Drafts are not collected until you confirm them.`));
   if (m.open_deviations) b.appendChild(el("div.banner.warn", `${m.open_deviations} corridor observation(s) in the last 7 days deviated from their confirmed geometry. Inspect them in Setup.`));
 }
+
+/* "Show all collected routes": extra TomTom alternatives and deviating corridor routes. Display only, never a request. */
+function wireExtras() {
+  for (const box of document.querySelectorAll(".extras-toggle")) {
+    box.checked = S.extras;
+    box.addEventListener("change", e => {
+      S.extras = e.target.checked;
+      try { localStorage.setItem("routes.extras", S.extras ? "1" : "0"); } catch { /* per-browser preference only */ }
+      document.querySelectorAll(".extras-toggle").forEach(b => { b.checked = S.extras; });
+      if (S.view === "map" && S.lastCycle) renderCycle(S.lastCycle.d, S.lastCycle.ctx);
+      else if (S.view === "analysis") loadAnalysis();
+      else if (S.view === "plan" && $("p-result").childNodes.length) runPlan();
+    });
+  }
+}
+const extrasParam = () => (S.extras ? "&extras=true" : "");
 
 /* ---------------- map view ---------------- */
 function wireMap() {
@@ -199,6 +216,7 @@ async function stepSlot(dir, changesOnly) {
 }
 
 async function renderCycle(d, ctx) {
+  S.lastCycle = d ? { d, ctx } : null;
   S.mapLayers.clearLayers();
   const stamp = clear($("m-stamp")), flags = clear($("m-flags")), list = clear($("m-routes"));
   if (!d) {
@@ -229,8 +247,9 @@ async function renderCycle(d, ctx) {
     const coords = await variantCoords(r.variant_id);
     if (!coords) continue;
     const dim = S.highlight && S.highlight !== (r.key || "alt" + r.id);
-    const line = routeLine(coords, r.role === "alternative" ? "#868e96" : r.color,
-      { weight: r.role === "recommended" ? 7 : r.role === "alternative" ? 3 : 5, dash: r.role === "alternative" ? "6 6" : null, opacity: dim ? 0.25 : 1 });
+    const alt = r.role === "alternative";
+    const line = routeLine(coords, alt ? (S.extras ? r.series_color : "#868e96") : r.color,
+      { weight: r.role === "recommended" ? 7 : alt ? (S.extras ? 4 : 3) : 5, dash: alt || (S.extras && r.deviation_flag) ? "6 6" : null, opacity: dim ? 0.25 : 1 });
     line.bindTooltip(`${r.name}: ${fmtMin(r.travel_time_s)}, delay ${fmtDelay(r.traffic_delay_s)}`, { sticky: true });
     line.addTo(S.mapLayers);
     if (r.role === "recommended" && r.traffic_sections.length && !dim) sectionLines(coords, r.traffic_sections).addTo(S.mapLayers);
@@ -255,7 +274,10 @@ async function renderCycle(d, ctx) {
 
   for (const r of d.routes.filter(r => r.role !== "alternative")) list.appendChild(routeCard(r, d, fastest));
   const alts = d.routes.filter(r => r.role === "alternative");
-  if (alts.length) {
+  if (alts.length && S.extras) {
+    list.appendChild(el("p.small.muted", "Extra alternatives TomTom returned with the unrestricted request. Shown because 'Show all collected routes' is on; they are not monitored corridors."));
+    for (const a of alts) list.appendChild(routeCard(a, d, fastest));
+  } else if (alts.length) {
     const det = el("details.card.small", el("summary", `${alts.length} extra alternative(s) returned with the unrestricted request (grey dashed on the map)`));
     for (const a of alts) det.appendChild(el("div", { style: { marginTop: "6px" } },
       el("b", a.status === "ok" ? fmtMin(a.travel_time_s) : "no data"), ` · delay ${fmtDelay(a.traffic_delay_s)} · ${fmtKm(a.distance_m)} · `,
@@ -274,9 +296,9 @@ function routeCard(r, d, fastest) {
   const key = r.key || "alt" + r.id;
   const card = el("div.route" + (r.status !== "ok" ? ".failed" : "") + (S.highlight && S.highlight !== key ? ".dim" : ""),
     { onclick: () => { S.highlight = S.highlight === key ? null : key; S.keepView = true; renderCycle(d, S.mode === "current" ? { latest: { age_s: null } } : { history: true }); } });
-  card.appendChild(el("div.swatch", { style: { background: r.role === "alternative" ? "#868e96" : r.color } }));
+  card.appendChild(el("div.swatch", { style: { background: r.role === "alternative" ? (S.extras ? r.series_color : "#868e96") : r.color } }));
   const body = el("div");
-  const kind = r.role === "recommended" ? "Unrestricted fastest" : r.role === "alternative" ? "Extra alternative from the unrestricted request" :
+  const kind = r.role === "recommended" ? "Unrestricted fastest" : r.role === "alternative" ? "Extra TomTom alternative · not monitored" :
     (r.corridor_method === "reconstruct" ? "Corridor · exact geometry" : "Corridor · via points (small variations allowed)");
   body.appendChild(el("div.row", el("span.name", r.name), el("span.spacer"), el("span.small.muted", kind)));
   if (r.status !== "ok") {
@@ -364,6 +386,7 @@ function analysisQuery() {
   const days = [...document.querySelectorAll("#a-weekdays input:checked")].map(i => i.value);
   const p = new URLSearchParams({ direction_id: S.direction, from: $("a-from").value, to: $("a-to").value });
   if (days.length < 7) p.set("weekdays", days.join(","));
+  if (S.extras) p.set("extras", "true");
   if ($("a-tfrom").value) p.set("time_from", $("a-tfrom").value);
   if ($("a-tto").value) p.set("time_to", $("a-tto").value);
   return p;
@@ -384,7 +407,8 @@ async function loadAnalysis() {
   for (const r of st.routes) {
     tb.appendChild(el("tr",
       el("td", el("span", { style: { display: "inline-block", width: "12px", height: "3px", background: r.color, marginRight: "6px", verticalAlign: "middle" } }), r.name),
-      el("td.num", fmtPct(r.coverage)), el("td.num", r.ok), el("td.num", r.failed), el("td.num", r.not_collected),
+      el("td.num", { title: r.dashed ? "Share of slots in which this route was present. It is not monitored, so a slot without it is not a failure." : "" }, fmtPct(r.coverage)),
+      el("td.num", r.ok), el("td.num", r.failed), el("td.num", { title: r.dashed ? "Slots in which TomTom did not return this route" : "" }, r.not_collected),
       el("td.num", fmtMin(r.travel_time_s.median)), el("td.num", fmtMin(r.travel_time_s.mean)), el("td.num", fmtMin(r.travel_time_s.p90)),
       el("td.num", fmtDelay(r.traffic_delay_s.median)), el("td.num", fmtDelay(r.traffic_delay_s.p90)), el("td.num", fmtSigned(r.excess_over_free_flow_s.median)),
       el("td.num", { title: `${r.fastest_count} of ${r.fastest_basis} compared cycles; ${r.no_data_in_compared_cycles} compared cycles had no data for this route` },
@@ -400,12 +424,12 @@ async function loadAnalysis() {
 }
 
 async function loadDayCharts() {
-  const d = await api(`/api/day?direction_id=${S.direction}&date=${$("a-day").value}`);
+  const d = await api(`/api/day?direction_id=${S.direction}&date=${$("a-day").value}${extrasParam()}`);
   const slots = d.slots.filter(s => s.cycle_status !== "future");
   const xs = slots.map(s => Date.parse(s.slot_utc));
-  const mk = metric => d.routes.map(r => ({ name: r.name, color: r.color, values: slots.map(s => { const o = s.routes[r.key]; return o && o.status === "ok" ? o[metric] : null; }) }));
+  const mk = metric => d.routes.map(r => ({ name: r.name, color: r.color, dashed: !!r.dashed, values: slots.map(s => { const o = s.routes[r.key]; return o && o.status === "ok" ? o[metric] : null; }) }));
   const leg = clear($("a-legend-day"));
-  d.routes.forEach(r => leg.appendChild(el("span", el("i", { style: { background: r.color } }), r.name)));
+  d.routes.forEach(r => leg.appendChild(el("span", el("i", { style: r.dashed ? { background: "none", borderTop: `2px dashed ${r.color}`, height: "0" } : { background: r.color } }), r.name)));
   leg.appendChild(el("span.muted", "Gaps = no successful observation"));
   const xf = (t, long) => fmtTime(new Date(t).toISOString(), long);
   const pickCycle = i => { if (slots[i].cycle_id) { S.cycleId = slots[i].cycle_id; S.day = d.date; location.hash = "#map"; setTimeout(() => setMode("history"), 0); } };
@@ -451,6 +475,7 @@ function initPlan() {
 async function runPlan() {
   const q = new URLSearchParams({ direction_id: S.direction, date: $("p-date").value, arrive: $("p-arrive").value, pct: $("p-pct").value,
     weeks: $("p-weeks").value, same_weekday: $("p-match").value === "1" });
+  if (S.extras) q.set("extras", "true");
   const out = clear($("p-result"));
   let r;
   try { r = await api("/api/plan?" + q); } catch (e) { out.appendChild(el("div.card", e.message)); return; }

@@ -4,7 +4,7 @@
 const SVGNS = "http://www.w3.org/2000/svg";
 function svg(tag, attrs = {}) {
   const n = document.createElementNS(SVGNS, tag);
-  for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+  for (const [k, v] of Object.entries(attrs)) if (v !== null && v !== undefined) n.setAttribute(k, v);
   return n;
 }
 
@@ -73,7 +73,7 @@ function lineChart(container, { xs, series, yFormat, xFormat, height = 220, yZer
       if (v === null || v === undefined) { pen = false; return; }
       d += (pen ? "L" : "M") + X(xs[i]).toFixed(1) + "," + Y(v).toFixed(1); pen = true;
     });
-    root.appendChild(svg("path", { d, fill: "none", stroke: s.color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+    root.appendChild(svg("path", { d, fill: "none", stroke: s.color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round", "stroke-dasharray": s.dashed ? "6 4" : null }));
     // isolated points (neighbours missing) still need a visible mark
     s.values.forEach((v, i) => {
       if (v === null || v === undefined) return;

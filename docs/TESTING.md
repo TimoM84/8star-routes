@@ -19,6 +19,8 @@
 | Persistence and restoration | online backup while running, restore with the app stopped, restart keeps data and does not reseed, migrations idempotent, restart recovery of interrupted cycles and pending ledger entries |
 | Security | auth required, read tokens read-only, CSRF header, tile proxy refuses other kinds, out-of-range tiles and unauthenticated use; key absent from logs, error messages, stored parameters and tile responses |
 | Exports | CSV columns and rows, GeoJSON lon/lat order |
+| Hiding and tolerance | retired corridors can be hidden (observations kept, removed from analysis), shown again, or purged explicitly; tolerance validated per corridor |
+| "Show all collected routes" | extra alternatives and deviating corridor routes appear as their own series only when asked for; corridor statistics are identical with or without them; no requests |
 | Private first-run setup | Empty live database makes no routing calls; user-created coordinates persist across restart; demo/test locations are fictional |
 | Demo separation | separate database file, `data_source: demo` everywhere |
 

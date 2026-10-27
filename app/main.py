@@ -322,10 +322,10 @@ def create_app(cfg: Config | None = None, client=None, start_scheduler: bool = T
         return J({"variants": [{**dict(x), "roads": json.loads(x["roads_json"])} for x in rows]})
 
     @r.get("/api/day", dependencies=[viewer])
-    def api_day(direction_id: int, day: str | None = Query(None, alias="date")):
+    def api_day(direction_id: int, day: str | None = Query(None, alias="date"), extras: bool = False):
         _dir(direction_id)
         d = _parse_day(day, utcnow().astimezone(cfg.tz).date())
-        return J(analysis.day_series(db, cfg, direction_id, d))
+        return J(analysis.day_series(db, cfg, direction_id, d, extras))
 
     def _range(frm, to) -> tuple[date, date]:
         today = utcnow().astimezone(cfg.tz).date()
@@ -339,7 +339,7 @@ def create_app(cfg: Config | None = None, client=None, start_scheduler: bool = T
 
     @r.get("/api/stats", dependencies=[viewer])
     def api_stats(direction_id: int, frm: str | None = Query(None, alias="from"), to: str | None = None,
-                  weekdays: str | None = None, time_from: str | None = None, time_to: str | None = None):
+                  weekdays: str | None = None, time_from: str | None = None, time_to: str | None = None, extras: bool = False):
         _dir(direction_id)
         a, b = _range(frm, to)
         wd = None
@@ -348,7 +348,7 @@ def create_app(cfg: Config | None = None, client=None, start_scheduler: bool = T
                 wd = {int(x) for x in weekdays.split(",") if x != ""}
             except ValueError:
                 raise HTTPException(400, "weekdays must be a comma separated list of 0-6") from None
-        return J(analysis.stats(db, cfg, direction_id, a, b, wd, _parse_hhmm(time_from), _parse_hhmm(time_to)))
+        return J(analysis.stats(db, cfg, direction_id, a, b, wd, _parse_hhmm(time_from), _parse_hhmm(time_to), extras))
 
     @r.get("/api/heatmap", dependencies=[viewer])
     def api_heatmap(direction_id: int, key: str = "recommended", frm: str | None = Query(None, alias="from"), to: str | None = None,
@@ -363,14 +363,14 @@ def create_app(cfg: Config | None = None, client=None, start_scheduler: bool = T
 
     @r.get("/api/plan", dependencies=[viewer])
     def api_plan(direction_id: int, day: str = Query(..., alias="date"), arrive: str = "09:00", pct: int = 90, weeks: int = 12,
-                 min_samples: int = 4, same_weekday: bool = True):
+                 min_samples: int = 4, same_weekday: bool = True, extras: bool = False):
         _dir(direction_id)
         if pct not in (50, 75, 80, 90, 95):
             raise HTTPException(400, "pct must be one of 50, 75, 80, 90, 95")
         if not 1 <= weeks <= 52 or not 2 <= min_samples <= 50:
             raise HTTPException(400, "weeks must be 1-52 and min_samples 2-50")
         return J(analysis.plan_arrival(db, cfg, direction_id, _parse_day(day, date.today()), _parse_hhmm(arrive), pct, weeks,
-                                       min_samples, same_weekday=same_weekday))
+                                       min_samples, same_weekday=same_weekday, extras=extras))
 
     @r.get("/api/events", dependencies=[viewer])
     def api_events(limit: int = 50):
