@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable, Protocol
 
+from . import families
 from . import geometry as geo
 from .budget import Budget, BudgetBlocked
 from .config import Config
@@ -104,7 +105,9 @@ def upsert_variant(db: Database, direction_id: int, route: ParsedRoute, seen: da
         (direction_id, fp, geo.compress(route.coords), len(route.coords), route.distance_m, json.dumps(route.roads), iso(seen), iso(seen)))
     db.execute("UPDATE route_variants SET last_seen_utc = MAX(last_seen_utc, ?), seen_count = seen_count + 1 WHERE direction_id = ? AND fingerprint = ?",
                (iso(seen), direction_id, fp))
-    return db.scalar("SELECT id FROM route_variants WHERE direction_id = ? AND fingerprint = ?", (direction_id, fp))
+    vid = db.scalar("SELECT id FROM route_variants WHERE direction_id = ? AND fingerprint = ?", (direction_id, fp))
+    families.assign_family(db, vid)
+    return vid
 
 
 class Collector:
@@ -210,16 +213,19 @@ class Collector:
                 if ref:
                     key = ("dev", vid, ref_id, t.corridor["deviation_threshold_m"])
                     dev = self._sim_cache.get(key)
-                    first_time = dev is None and not self.db.scalar(
-                        "SELECT 1 FROM observations WHERE variant_id = ? AND corridor_id = ? LIMIT 1", (vid, t.corridor["id"]))
                     if dev is None:
                         dev = self._sim_cache[key] = geo.deviation(r.coords, ref, t.corridor["deviation_threshold_m"])
                     fields.update(deviation_flag=int(dev.flagged), deviation_share=round(dev.share_outside, 4),
                                   deviation_max_m=int(dev.max_m) if dev.max_m != float("inf") else None)
-                    if dev.flagged and first_time:  # one event per new deviating geometry, not per observation
+                    # One event per new deviating *route family*, not per observation or per slightly different geometry.
+                    fam = self.db.scalar("SELECT family_id FROM route_variants WHERE id = ?", (vid,))
+                    if dev.flagged and not self.db.scalar(
+                            "SELECT 1 FROM observations o JOIN route_variants v ON v.id = o.variant_id "
+                            "WHERE o.corridor_id = ? AND o.deviation_flag = 1 AND v.family_id = ? LIMIT 1", (t.corridor["id"], fam)):
                         self.db.event("warning", "corridor_deviation",
-                                      f"Corridor '{t.corridor['name']}' deviated: {dev.share_outside:.0%} of route outside "
-                                      f"{t.corridor['deviation_threshold_m']} m, max {dev.max_m:.0f} m. Marked for inspection.")
+                                      f"Corridor '{t.corridor['name']}' took a different route ({families.family_label(self.db, fam)}): "
+                                      f"{dev.share_outside:.0%} of it lies more than {t.corridor['deviation_threshold_m']} m from the "
+                                      f"confirmed geometry, max {dev.max_m:.0f} m. Inspect it in Setup.")
             else:
                 best, score = None, 0.0
                 for c in confirmed:

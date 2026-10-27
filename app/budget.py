@@ -79,10 +79,16 @@ class Budget:
         return self.settings()
 
     def ceiling(self) -> int:
+        """Most counted routing requests this application may make in a period.
+
+        A hard ceiling override replaces the safety reserve, but is never allowed above
+        allowance - other applications: a typo must not let the app exceed the provider allowance.
+        """
         s = self.settings()
+        cap = max(0, s["routing_monthly_allowance"] - s["routing_other_apps_allowance"])
         if s["routing_hard_ceiling"] > 0:
-            return s["routing_hard_ceiling"]
-        return max(0, s["routing_monthly_allowance"] - s["routing_safety_reserve"] - s["routing_other_apps_allowance"])
+            return min(s["routing_hard_ceiling"], cap)
+        return max(0, cap - s["routing_safety_reserve"])
 
     # --- periods ---------------------------------------------------------------------
     def period(self, now: datetime | None = None) -> PeriodInfo:
@@ -236,6 +242,18 @@ class Budget:
                         (self.clock().strftime("%Y-%m-%d"), kind))
 
     # --- status & forecast -----------------------------------------------------------
+    def daily_usage(self, p: PeriodInfo) -> list[dict]:
+        rows = self.db.all(
+            "SELECT substr(created_utc, 1, 10) day, purpose, SUM(counted) counted, SUM(outcome NOT IN ('ok', 'pending')) failed_or_blocked "
+            "FROM request_ledger WHERE kind = 'routing' AND period_key = ? GROUP BY day, purpose ORDER BY day", (p.key,))
+        days: dict[str, dict] = {}
+        for r in rows:
+            d = days.setdefault(r["day"], {"day_utc": r["day"], "counted": 0, "by_purpose": {}, "failed_or_blocked": 0})
+            d["counted"] += r["counted"] or 0
+            d["failed_or_blocked"] += r["failed_or_blocked"] or 0
+            d["by_purpose"][r["purpose"]] = r["counted"] or 0
+        return list(days.values())
+
     def status(self, requests_per_cycle: int, collection_enabled: bool) -> dict:
         now = self.clock()
         p = self.period(now)
@@ -266,6 +284,7 @@ class Budget:
                 "safety_reserve": s["routing_safety_reserve"],
                 "other_apps_allowance": s["routing_other_apps_allowance"],
                 "hard_ceiling_override": s["routing_hard_ceiling"],
+                "hard_ceiling_clamped": s["routing_hard_ceiling"] > 0 and ceiling < s["routing_hard_ceiling"],
                 "ceiling": ceiling,
                 "opening_usage": self.opening_usage(p.key),
                 "ledger_counted": self.ledger_count(p.key),
@@ -284,7 +303,10 @@ class Budget:
                 "projected_to_exceed_ceiling": projected > ceiling,
                 "projected_pause_at_utc": exhaust_at,
                 "nominal_full_period_requests": nominal,
+                # Left for retries, manual refreshes and previews once every remaining scheduled cycle has run.
+                "spare_after_schedule": ceiling - projected,
             },
+            "daily": self.daily_usage(p),
             "collection_allowed": ok,
             "blocked_reason": reason,
             "blocked_message": message,
