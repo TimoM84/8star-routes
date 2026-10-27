@@ -65,8 +65,15 @@ before and after and checks every existing row column by column.
 ## 3. Update in Dockhand
 
 1. Open the 8star-routes stack.
-2. If the stack follows a branch, make sure it points at the branch or commit you want (normally `main` after the
-   pull request is merged).
+2. If the stack builds straight from GitHub, pin it to a release tag so you know exactly what runs:
+
+   ```yaml
+   build:
+     context: https://github.com/TimoM84/8star-routes.git#v1.1.0
+   pull_policy: build
+   ```
+
+   With `#main` the build follows the latest commit on `main`.
 3. **Pull/redeploy with rebuild** (Dockhand rebuilds the image from the `Dockerfile` and recreates the container).
    The named volume is kept. Do **not** remove the volume or use any "remove volumes" option.
 4. Watch the stack log. Expected lines:
@@ -78,7 +85,10 @@ before and after and checks every existing row column by column.
    routes.scheduler: scheduler started (...)
    ```
 
-5. The container becomes `healthy`. Open the app: the Map shows the latest stored observation, Budget shows the same
+5. The container becomes `healthy` and `/healthz` reports the new `version` (1.1.0 for this release). If it still
+   reports the old version, the container was recreated from the old image: redeploy with rebuild again. Reload the
+   browser tab (and the Home Assistant dashboard) once; the page loads the new scripts because their URL contains the
+   version. Then check that Open the app: the Map shows the latest stored observation, Budget shows the same
    ledger count as before, and **Scheduled collection** says *Running*.
 
 Nothing needs to be configured for this release. Settings stored in the database (budget values, corridors,
