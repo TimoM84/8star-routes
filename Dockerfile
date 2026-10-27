@@ -9,7 +9,7 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
-COPY scripts/backup.py scripts/restore.py ./scripts/
+COPY scripts/backup.py scripts/restore.py scripts/check_upgrade.py ./scripts/
 
 RUN useradd --system --uid 10001 --home /app routes && mkdir -p /data && chown -R routes:routes /data
 USER routes

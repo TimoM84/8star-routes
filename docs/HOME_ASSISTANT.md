@@ -119,7 +119,9 @@ routes_read_token: "Bearer <API_READ_TOKEN>"
 ```
 
 A sensor is `unknown` when the latest recommendation failed or nothing is stored yet. `stale: true` means the
-observation is older than `STALE_AFTER_MINUTES` (40). Polling these endpoints only reads the database.
+observation is older than `STALE_AFTER_MINUTES` (40). `fastest_route` is only filled when every monitored corridor
+has a result in the latest cycle (`comparable: true`); otherwise it is empty rather than naming a route that only
+looks fastest because another one failed. Polling these endpoints only reads the database.
 
 Example automation (leave-now reminder):
 

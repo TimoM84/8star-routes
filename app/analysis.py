@@ -274,6 +274,7 @@ def _obs_dict(o, ctx: _Ctx, note: dict | None) -> dict:
         d["name"], d["color"] = c.get("name", "Deleted corridor"), c.get("color", ALTERNATIVE_COLOR)
         d["corridor_method"] = c.get("method")
         d["deviation_threshold_m"] = c.get("deviation_threshold_m")
+        d["reference_variant_id"] = c.get("reference_variant_id")
         d["corridor_hidden"] = bool(c.get("hidden_utc"))
     elif o["role"] == "recommended":
         d["name"], d["color"] = "TomTom recommendation", RECOMMENDED_COLOR

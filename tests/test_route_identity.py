@@ -268,3 +268,28 @@ def test_new_read_endpoints_make_no_requests(tmp_path):
         assert tc.put("/api/corridors/1", json={"color": "red"}, headers=H).status_code == 400
         assert tc.put("/api/corridors/1", json={"color": "#123abc"}, headers=H).status_code == 200
         assert len(client.calls) == n
+
+
+def test_failed_migration_is_rolled_back_completely(tmp_path, monkeypatch):
+    """If migration 003 fails half-way (or the container is killed), nothing of it is applied and no data changes."""
+    old_dir = tmp_path / "m"
+    old_dir.mkdir()
+    for f in ("001_initial.sql", "002_corridor_hidden.sql"):
+        shutil.copy(dbmod.MIGRATIONS_DIR / f, old_dir / f)
+    real_dir = dbmod.MIGRATIONS_DIR
+    monkeypatch.setattr(dbmod, "MIGRATIONS_DIR", old_dir)
+    db = Database(tmp_path / "routes.sqlite")
+    migrate(db, tmp_path / "backups")
+    seed_demo(db)
+    (old_dir / "003_route_families.sql").write_text((real_dir / "003_route_families.sql").read_text() + "\nSELECT no_such_function();\n")
+    import pytest
+    with pytest.raises(Exception):
+        migrate(db, tmp_path / "backups")
+    assert db.scalar("SELECT COUNT(*) FROM schema_migrations") == 2
+    assert "retired_utc" not in [r[1] for r in db.all("PRAGMA table_info(corridors)")]
+    assert not db.scalar("SELECT COUNT(*) FROM sqlite_master WHERE name = 'route_families'")
+    assert db.scalar("SELECT COUNT(*) FROM corridors") == 4
+    assert list((tmp_path / "backups").glob("pre-migration-*.sqlite"))  # written before anything changed
+    monkeypatch.setattr(dbmod, "MIGRATIONS_DIR", real_dir)
+    assert migrate(db, tmp_path / "backups") == ["003_route_families"]
+    db.close()

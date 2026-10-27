@@ -79,7 +79,7 @@ function renderBanners() {
   else if (!m.collection_allowed) b.appendChild(el("div.banner.bad", `Collection paused: ${m.blocked_message}`));
   else if (m.budget_warning) b.appendChild(el("div.banner.warn", "Routing budget above the warning threshold. Automatic retries are disabled. See Budget."));
   if (m.pending_drafts) b.appendChild(el("div.banner.info", `${m.pending_drafts} corridor draft(s) wait for inspection in Setup. Drafts are not collected until you confirm them.`));
-  if (m.open_deviations) b.appendChild(el("div.banner.warn", `${m.open_deviations} corridor observation(s) in the last 7 days deviated from their confirmed geometry. Inspect them in Setup.`));
+  if (m.open_deviations) b.appendChild(el("div.banner.warn", `${m.open_deviations} distinct deviating corridor route(s) in the last 7 days. Inspect them in Setup (Inspect deviations).`));
 }
 
 /* "Show all collected routes": extra TomTom alternatives and deviating corridor routes. Display only, never a request. */
@@ -246,18 +246,25 @@ async function renderCycle(d, ctx) {
     if (r.status !== "ok" || !r.variant_id) continue;
     const coords = await variantCoords(r.variant_id);
     if (!coords) continue;
-    const dim = S.highlight && S.highlight !== (r.key || "alt" + r.id);
+    const key = r.key || "alt" + r.id;
+    const dim = S.highlight && S.highlight !== key;
     const alt = r.role === "alternative";
-    const line = routeLine(coords, alt ? (S.extras ? r.series_color : "#868e96") : r.color,
-      { weight: r.role === "recommended" ? 7 : alt ? (S.extras ? 4 : 3) : 5, dash: alt || (S.extras && r.deviation_flag) ? "6 6" : null, opacity: dim ? 0.25 : 1 });
-    line.bindTooltip(`${r.name}: ${fmtMin(r.travel_time_s)}, delay ${fmtDelay(r.traffic_delay_s)}`, { sticky: true });
+    const altColor = !S.extras || r.duplicate_of ? "#adb5bd" : r.series_color;
+    const line = routeLine(coords, alt ? altColor : r.color,
+      { weight: r.role === "recommended" ? 7 : alt ? (S.extras && !r.duplicate_of ? 4 : 2) : 5, dash: alt || r.deviation_flag ? "6 6" : null, opacity: dim ? 0.25 : 1 });
+    line.bindTooltip(`${r.name}${r.duplicate_of ? " (same route as " + r.duplicate_of.name + ")" : ""}: ${fmtMin(r.travel_time_s)}, delay ${fmtDelay(r.traffic_delay_s)}`, { sticky: true });
     line.addTo(S.mapLayers);
     if (r.role === "recommended" && r.traffic_sections.length && !dim) sectionLines(coords, r.traffic_sections).addTo(S.mapLayers);
     bounds.push(...coords);
     const ch = d.changes[r.key];
     if (ch && ch.geometry_changed && ch.previous_variant_id && S.highlight === r.key) {
       const prev = await variantCoords(ch.previous_variant_id);
-      if (prev) routeLine(prev, "#495057", { weight: 3, dash: "2 6" }).addTo(S.mapLayers);
+      if (prev) routeLine(prev, "#495057", { weight: 3, dash: "2 6" }).bindTooltip("Previous cycle's geometry").addTo(S.mapLayers);
+    }
+    // A highlighted deviating corridor observation is drawn against the corridor's confirmed geometry.
+    if (r.deviation_flag && r.reference_variant_id && S.highlight === r.key) {
+      const ref = await variantCoords(r.reference_variant_id);
+      if (ref) routeLine(ref, "#212529", { weight: 3, dash: "1 7" }).bindTooltip(`${r.name}: confirmed geometry`, { sticky: true }).addTo(S.mapLayers);
     }
   }
   const dir = RT.meta.directions.find(x => x.id === S.direction);
@@ -275,13 +282,15 @@ async function renderCycle(d, ctx) {
   for (const r of d.routes.filter(r => r.role !== "alternative")) list.appendChild(routeCard(r, d, fastest));
   const alts = d.routes.filter(r => r.role === "alternative");
   if (alts.length && S.extras) {
-    list.appendChild(el("p.small.muted", "Extra alternatives TomTom returned with the unrestricted request. Shown because 'Show all collected routes' is on; they are not monitored corridors."));
+    list.appendChild(el("h3.section-label", "Not monitored · extra alternatives in this cycle"));
+    list.appendChild(el("p.small.muted", "Returned with the unrestricted request. Each distinct route keeps the same identity (route number) over time, whatever TomTom's ordering. " +
+      "An alternative that is the same route as a monitored corridor is shown thin and grey and is not counted again."));
     for (const a of alts) list.appendChild(routeCard(a, d, fastest));
   } else if (alts.length) {
-    const det = el("details.card.small", el("summary", `${alts.length} extra alternative(s) returned with the unrestricted request (grey dashed on the map)`));
+    const det = el("details.card.small", el("summary", `${alts.length} extra alternative(s) returned with the unrestricted request (thin grey dashed on the map)`));
     for (const a of alts) det.appendChild(el("div", { style: { marginTop: "6px" } },
-      el("b", a.status === "ok" ? fmtMin(a.travel_time_s) : "no data"), ` · delay ${fmtDelay(a.traffic_delay_s)} · ${fmtKm(a.distance_m)} · `,
-      a.resembles ? `resembles ${a.resembles.name}` : "no matching corridor"));
+      el("b", a.status === "ok" ? fmtMin(a.travel_time_s) : "no data"), ` · delay ${fmtDelay(a.traffic_delay_s)} · ${fmtKm(a.distance_m)} · ${a.family || "unknown route"} · `,
+      a.duplicate_of ? `same route as ${a.duplicate_of.name}` : a.resembles ? `resembles ${a.resembles.name}` : "no matching corridor"));
     det.appendChild(el("p.muted", "Kept for reference. They are not substitutes for the monitored corridors."));
     list.appendChild(det);
   }
@@ -296,10 +305,10 @@ function routeCard(r, d, fastest) {
   const key = r.key || "alt" + r.id;
   const card = el("div.route" + (r.status !== "ok" ? ".failed" : "") + (S.highlight && S.highlight !== key ? ".dim" : ""),
     { onclick: () => { S.highlight = S.highlight === key ? null : key; S.keepView = true; renderCycle(d, S.mode === "current" ? { latest: { age_s: null } } : { history: true }); } });
-  card.appendChild(el("div.swatch", { style: { background: r.role === "alternative" ? (S.extras ? r.series_color : "#868e96") : r.color } }));
+  card.appendChild(el("div.swatch" + (r.role === "alternative" || r.deviation_flag ? ".dashed" : ""), { style: { background: r.role === "alternative" ? (r.duplicate_of ? "#adb5bd" : r.series_color) : r.color, color: r.role === "alternative" ? (r.duplicate_of ? "#adb5bd" : r.series_color) : r.color } }));
   const body = el("div");
-  const kind = r.role === "recommended" ? "Unrestricted fastest" : r.role === "alternative" ? "Extra TomTom alternative · not monitored" :
-    (r.corridor_method === "reconstruct" ? "Corridor · exact geometry" : "Corridor · via points (small variations allowed)");
+  const kind = r.role === "recommended" ? "Unrestricted fastest · monitored" : r.role === "alternative" ? "Extra alternative · not monitored" :
+    (r.corridor_method === "reconstruct" ? "Corridor · exact geometry" : "Corridor · via points") + ` · tolerance ${r.deviation_threshold_m ?? "?"} m`;
   body.appendChild(el("div.row", el("span.name", r.name), el("span.spacer"), el("span.small.muted", kind)));
   if (r.status !== "ok") {
     body.appendChild(el("div.small", { style: { color: "var(--bad)" } }, "No data: " + (r.failure_reason || "request failed")));
@@ -320,9 +329,13 @@ function routeCard(r, d, fastest) {
     add("Depart / arrive", `${fmtOffsetTime(r.departure_time)} → ${fmtOffsetTime(r.arrival_time)}`, "TomTom departure and arrival times");
     body.appendChild(mt);
     const tags = el("div.tags");
-    if (r.resembles) tags.appendChild(el("span.badge.neutral", `Resembles ${r.resembles.name} (${fmtPct(r.resembles.score)})`));
+    if (r.duplicate_of) tags.appendChild(el("span.badge.neutral", { title: "This alternative is the same route as a monitored corridor observed in this cycle, so it is not counted a second time." }, `Same route as ${r.duplicate_of.name} · not counted again`));
+    else if (r.resembles) tags.appendChild(el("span.badge.neutral", `Resembles ${r.resembles.name} (${fmtPct(r.resembles.score)})`));
     else if (r.role === "recommended") tags.appendChild(el("span.badge.neutral", "Does not match a confirmed corridor"));
-    if (r.deviation_flag) tags.appendChild(el("span.badge.bad", `Deviates from corridor: ${fmtPct(r.deviation_share)} off, max ${r.deviation_max_m} m`));
+    if (r.family && r.role !== "corridor") tags.appendChild(el("span.badge.neutral", { title: "Stable identity of this road route; small geometry differences keep the same number." }, r.family));
+    if (r.corridor_hidden) tags.appendChild(el("span.badge.neutral", "Hidden corridor"));
+    if (r.deviation_flag) tags.appendChild(el("span.badge.bad", { title: `TomTom's route for this corridor strayed more than the corridor's tolerance (${r.deviation_threshold_m} m) from its confirmed geometry. Click the card to compare with the confirmed geometry.` },
+      `Deviates: ${fmtPct(r.deviation_share)} beyond ${r.deviation_threshold_m} m, max ${r.deviation_max_m} m · ${r.family || ""}`));
     const ch = d.changes[r.key];
     if (ch && ch.route_changed) tags.appendChild(el("span.badge.warn", "Recommendation changed since previous cycle"));
     else if (ch && ch.geometry_changed) tags.appendChild(el("span.badge.neutral", "Geometry changed since previous cycle (click to compare)"));
@@ -396,7 +409,7 @@ async function loadAnalysis() {
   const st = await api("/api/stats?" + analysisQuery());
   const cs = st.cycle_status;
   const sum = clear($("a-summary"));
-  sum.appendChild(document.createTextNode(`${st.expected_slots} expected slots · ${cs.complete || 0} complete · ${cs.partial || 0} partial · ` +
+  sum.appendChild(document.createTextNode(`${st.expected_slots} expected slots on ${st.dates_with_data} days with data · ${cs.complete || 0} complete · ${cs.partial || 0} partial · ` +
     `${(cs.failed || 0) + (cs.skipped || 0) + (cs.missed || 0) + (cs.interrupted || 0) + (cs.no_record || 0)} without data · ` +
     `${st.comparable_cycles} cycles comparable · recommendation changed ${st.recommendation_changes} times in ${st.recommendation_transitions} transitions`));
   if (RT.meta.mode === "demo") sum.appendChild(el("span.badge.demo", { style: { marginLeft: "6px" } }, "Synthetic"));
@@ -404,23 +417,55 @@ async function loadAnalysis() {
   t.appendChild(el("thead", el("tr", ["Route", "Coverage", "Obs.", "Failed", "Missing", "Median", "Mean", "90th pct", "Median delay", "90th pct delay", "Median above free flow", "Fastest*"]
     .map((h, i) => el("th" + (i ? ".num" : ""), h)))));
   const tb = el("tbody");
-  for (const r of st.routes) {
-    tb.appendChild(el("tr",
-      el("td", el("span", { style: { display: "inline-block", width: "12px", height: "3px", background: r.color, marginRight: "6px", verticalAlign: "middle" } }), r.name),
-      el("td.num", { title: r.dashed ? "Share of slots in which this route was present. It is not monitored, so a slot without it is not a failure." : "" }, fmtPct(r.coverage)),
-      el("td.num", r.ok), el("td.num", r.failed), el("td.num", { title: r.dashed ? "Slots in which TomTom did not return this route" : "" }, r.not_collected),
-      el("td.num", fmtMin(r.travel_time_s.median)), el("td.num", fmtMin(r.travel_time_s.mean)), el("td.num", fmtMin(r.travel_time_s.p90)),
-      el("td.num", fmtDelay(r.traffic_delay_s.median)), el("td.num", fmtDelay(r.traffic_delay_s.p90)), el("td.num", fmtSigned(r.excess_over_free_flow_s.median)),
-      el("td.num", { title: `${r.fastest_count} of ${r.fastest_basis} compared cycles; ${r.no_data_in_compared_cycles} compared cycles had no data for this route` },
-        r.fastest_share === null ? "—" : `${fmtPct(r.fastest_share)} (${r.fastest_count})`)));
+  const parentName = k => (st.routes.find(x => x.key === k) || {}).name || k;
+  const groups = [["Monitored every cycle", st.routes.filter(r => r.monitored)],
+                  ["Not monitored · deviating corridor variants (part of the corridor's row above, not extra samples)", st.routes.filter(r => r.kind === "deviation")],
+                  ["Not monitored · extra TomTom alternatives (only present when TomTom returned them)", st.routes.filter(r => r.kind === "alternative")]];
+  for (const [title, rows] of groups) {
+    if (!rows.length) continue;
+    if (S.extras) tb.appendChild(el("tr.group", el("td", { colspan: 12 }, title)));
+    for (const r of rows) {
+      const inc = !r.monitored;
+      const swatch = el("span", { style: { display: "inline-block", width: "12px", height: "0", borderTop: `3px ${r.dashed ? "dashed" : "solid"} ${r.color}`, marginRight: "6px", verticalAlign: "middle" } });
+      tb.appendChild(el("tr" + (inc ? ".incidental" : ""),
+        el("td", { style: { whiteSpace: "normal", minWidth: "180px" } }, swatch, r.name,
+          r.kind === "deviation" ? el("div.conf", `${fmtPct(r.share_of_parent)} of ${parentName(r.subset_of)}'s observations`) : null,
+          el("div.conf" + (r.ok < 30 ? ".low" : ""), `n = ${r.ok} · ${r.confidence} confidence`)),
+        el("td.num", { title: inc ? "Share of slots in which this route was present. It is not monitored, so a slot without it is not a failure." : "Successful observations / expected slots" }, fmtPct(r.coverage)),
+        el("td.num", r.ok), el("td.num", inc ? "—" : r.failed), el("td.num", { title: inc ? "Slots in which TomTom did not return this route" : "Expected slots without an observation" }, r.not_collected),
+        el("td.num", fmtMin(r.travel_time_s.median)), el("td.num", fmtMin(r.travel_time_s.mean)), el("td.num", fmtMin(r.travel_time_s.p90)),
+        el("td.num", fmtDelay(r.traffic_delay_s.median)), el("td.num", fmtDelay(r.traffic_delay_s.p90)), el("td.num", fmtSigned(r.excess_over_free_flow_s.median)),
+        el("td.num", { title: inc ? "Not-monitored routes never compete for 'fastest'" : `${r.fastest_count} of ${r.fastest_basis} compared cycles; ${r.no_data_in_compared_cycles} compared cycles had no data for this route` },
+          r.fastest_share === null ? "—" : `${fmtPct(r.fastest_share)} (${r.fastest_count})`)));
+    }
   }
   t.appendChild(tb);
-  $("a-method").textContent = st.method;
+  $("a-method").textContent = st.method + " *Fastest: share of compared cycles in which the route was fastest (corridors) or beat every corridor by more than a minute (recommendation).";
+  renderWeekdayTable(st);
   const hk = $("h-key"), prev = hk.value;
   clear(hk);
   for (const r of st.routes) hk.appendChild(el("option", { value: r.key }, r.name));
   hk.value = prev && [...hk.options].some(o => o.value === prev) ? prev : "recommended";
   loadDayCharts(); loadHeatmap();
+}
+
+/* Median estimated travel time per weekday for the monitored routes (same filters as the table). */
+function renderWeekdayTable(st) {
+  const box = clear($("a-weekday"));
+  const rows = st.routes.filter(r => r.monitored);
+  const days = [0, 1, 2, 3, 4, 5, 6].filter(w => rows.some(r => r.by_weekday[w] && r.by_weekday[w].n));
+  if (!days.length) { box.appendChild(el("p.small.muted", "No successful observations in this range.")); return; }
+  const t = el("table", el("thead", el("tr", el("th", "Route"), ...days.map(w => el("th.num", WEEKDAYS[w])))));
+  const tb = el("tbody");
+  for (const r of rows) {
+    tb.appendChild(el("tr", el("td", r.name), ...days.map(w => {
+      const c = r.by_weekday[w];
+      return el("td.num", { title: c ? `n = ${c.n}, 90th percentile ${fmtMin(c.p90)}` : "no data" },
+        c ? fmtMin(c.median) : "—", c ? el("div.conf" + (c.n < 10 ? ".low" : ""), `n=${c.n}`) : null);
+    })));
+  }
+  t.appendChild(tb);
+  box.appendChild(el("div.table-wrap", t));
 }
 
 async function loadDayCharts() {
@@ -485,40 +530,66 @@ async function runPlan() {
   if (r.state === "insufficient_data") {
     card.appendChild(el("h2", "Not enough observations yet"));
     card.appendChild(el("p", `No departure slot has at least ${r.min_samples} successful observations on comparable days in the last ${r.history.weeks} weeks. ` +
-      "Keep collecting; recommendations become useful as weeks of history accumulate."));
+      "Keep collecting, or compare with all weekdays instead of the same weekday; advice becomes useful as weeks of history accumulate."));
   } else if (r.state === "no_feasible_departure") {
     card.appendChild(el("h2", "No departure in the window meets the target"));
-    card.appendChild(el("p", "None of the observed departure slots in the three hours before your target arrives on time at this reliability level. Try an earlier search window, a lower reliability level, or check data coverage."));
+    card.appendChild(el("p", "None of the observed departure slots in the three hours before your target arrives on time at this reliability level. Try a lower reliability level, or check data coverage."));
   } else if (r.state === "invalid") {
     card.appendChild(el("p", r.message)); return;
   } else {
     const rec = r.recommendation;
     card.appendChild(el("h2", `Leave by ${fmtTime(rec.departure_local)}, ${rec.key === "recommended" ? "following TomTom's recommendation" : "via " + rec.name}`));
-    card.appendChild(el("p", `To arrive by ${fmtTime(r.target_arrival_local)} on ${r.percentile}% of comparable observed days. ` +
-      `Median arrival ${fmtTime(rec.median_arrival_local)}, ${r.percentile}th-percentile arrival ${fmtTime(rec.quantile_arrival_local)} ` +
-      `(margin ${Math.round(rec.margin_s / 60)} min). Based on ${rec.n} observations at this slot.`));
+    const ans = el("div.answers");
+    const box = (v, l, t) => el("div.kpi", { title: t || "" }, el("div.v", v), el("div.l", l));
+    ans.appendChild(box(fmtTime(rec.median_arrival_local), `typical arrival (median), target ${fmtTime(r.target_arrival_local)}`));
+    ans.appendChild(box(`${rec.on_time} of ${rec.n} days`, `would have arrived on time leaving at ${fmtTime(rec.departure_local)} (${fmtPct(rec.on_time_share)})`,
+      "Share of the observed comparable days on which this departure arrived by the target, according to TomTom's estimates at that time."));
+    ans.appendChild(box(fmtMin(rec.buffer_s), `buffer on top of the typical ${fmtMin(rec.median_s)} for ${r.percentile}% reliability`,
+      `${r.percentile}th percentile minus median travel time at this departure slot.`));
+    for (const e of rec.earlier || []) {
+      ans.appendChild(box(e.on_time_share === undefined || e.on_time_share === null ? "no data" : fmtPct(e.on_time_share),
+        `on time if you leave ${e.minutes_earlier} min earlier (${fmtTime(e.departure_local)}, n=${e.n})` + (e.median_arrival_local ? `, typically arriving ${fmtTime(e.median_arrival_local)}` : "")));
+    }
+    if (r.comparison) {
+      const nm = k => (r.comparison.routes.find(x => x.key === k) || {}).name;
+      ans.appendChild(box(nm(r.comparison.fastest), `fastest monitored route at ${fmtTime(r.comparison.departure_local)} (lowest median)`));
+      ans.appendChild(box(nm(r.comparison.most_reliable), "most reliable (smallest spread between good and bad days)",
+        "Smallest difference between the 10th and 90th percentile travel time at this departure slot."));
+    }
+    card.appendChild(ans);
+    card.appendChild(el("p.small", `Based on ${rec.n} observations at this departure slot (${rec.confidence} confidence). ` +
+      `${r.percentile}th-percentile arrival ${fmtTime(rec.quantile_arrival_local)}, ${Math.round(rec.margin_s / 60)} min before the target.`));
   }
-  card.appendChild(el("p.small.muted", `History: ${r.history.distinct_dates} distinct dates (${r.history.matching}), ${fmtTime(r.history.from, true)} – ${fmtTime(r.history.to, true)}. ${r.method}`));
+  const h = r.history;
+  card.appendChild(el("p.small.muted", `History used: ${h.distinct_dates} distinct dates (${h.matching}), ` +
+    (h.first_observation_utc ? `${fmtTime(h.first_observation_utc, true)} – ${fmtTime(h.last_observation_utc, true)}` : "none") +
+    ` within the last ${h.weeks} weeks. ${r.method}`));
   for (const n of r.notes) card.appendChild(el("p.banner.warn", n));
   const tbl = el("table");
-  tbl.appendChild(el("thead", el("tr", el("th", "Departure"), ...r.routes.map(x => el("th.num", x.name)))));
+  const cols = r.routes;
+  tbl.appendChild(el("thead", el("tr", el("th", "Departure"), ...cols.map(x => el("th.num", { title: x.eligible ? "" : "Not monitored: never recommended" },
+    x.eligible ? x.name : el("span.muted", x.name))))));
   const tb = el("tbody");
-  const n = r.routes[0] ? r.routes[0].slots.length : 0;
+  const n = cols[0] ? cols[0].slots.length : 0;
   for (let i = n - 1; i >= 0; i--) {
-    const s0 = r.routes[0].slots[i];
+    const s0 = cols[0].slots[i];
     const tr = el("tr", el("td", fmtTime(s0.departure_local)));
-    for (const x of r.routes) {
+    for (const x of cols) {
       const s = x.slots[i];
       const isRec = r.recommendation && r.recommendation.key === x.key && r.recommendation.minute === s.minute;
-      tr.appendChild(el("td.num", { title: `${s.n} observations, ${s.failed} failed/missing at this slot` },
-        s.quantile_s === undefined ? `insufficient (${s.n})` :
-          `${fmtTime(s.quantile_arrival_local)}${s.meets_target ? " ✓" : ""} · n=${s.n}`));
+      const tip = `${s.n} observations of ${s.expected} comparable slots (${fmtPct(s.coverage)} coverage), ${s.failed} failed` +
+        (s.on_time_share !== undefined ? `; on time on ${s.on_time} of ${s.n} days` : "");
+      tr.appendChild(el("td.num" + (x.eligible ? "" : ".muted"), { title: tip },
+        s.quantile_s === undefined ? `insufficient (n=${s.n})` :
+          `${fmtTime(s.quantile_arrival_local)}${s.meets_target ? " ✓" : ""} · ${fmtPct(s.on_time_share)} · n=${s.n}`));
       if (isRec) tr.classList.add("highlight");
     }
     tb.appendChild(tr);
   }
   tbl.appendChild(tb);
-  const c2 = el("div.card", el("h3", `${r.percentile}th-percentile arrival per departure slot`), el("p.small.muted", "✓ = arrives by the target at the chosen reliability. Earlier rows show whether leaving 15 or 30 minutes earlier usually helps."), el("div.table-wrap", tbl));
+  const c2 = el("div.card", el("h3", `${r.percentile}th-percentile arrival per departure slot`),
+    el("p.small.muted", "Each cell: arrival time on a bad day at the chosen reliability, ✓ when that is still on time, share of observed days that arrived on time, and the number of observations. Earlier rows show whether leaving 15 or 30 minutes earlier helps."),
+    el("div.table-wrap", tbl));
   out.appendChild(c2);
 }
 
@@ -590,45 +661,85 @@ async function refreshMeta() {
 }
 
 function corridorRow(c, after) {
-  const st = c.status === "confirmed" ? el("span.badge.ok", "✓ Confirmed") : c.status === "draft" ? el("span.badge.warn", c.source === "suggested" ? "Draft · suggested, unconfirmed" : "Draft") : el("span.badge.neutral", c.hidden ? "Retired · hidden" : "Retired");
+  const st = c.status === "confirmed" ? el("span.badge.ok", "✓ Confirmed · collected") : c.status === "draft" ? el("span.badge.warn", c.source === "suggested" ? "Draft · suggested, unconfirmed" : "Draft · not collected") : el("span.badge.neutral", c.hidden ? "Retired · hidden" : "Retired · not collected");
   const row = el("div.corridor",
     el("div.row", el("span", { style: { width: "14px", height: "4px", background: c.color, borderRadius: "2px" } }), el("b", c.name), el("span.spacer"), st),
-    el("div.small.muted", `${c.method === "reconstruct" ? `Exact geometry (${c.supporting_points_count} supporting points)` : `Via points: ${c.waypoints.map(p => p.map(v => (+v).toFixed(4)).join(", ")).join(" → ")}`}` +
-      ` · ${c.observations} observations · ${c.deviations} deviations · tolerance ${c.deviation_threshold_m} m`),
+    el("div.row.small", { style: { marginTop: "4px" } },
+      el("span.badge.neutral", { title: "A route TomTom returns for this corridor is flagged as deviating when a substantial part of it lies further than this from the confirmed geometry." }, `Deviation tolerance ${c.deviation_threshold_m} m`),
+      el("span.muted", `${c.observations} observations · ${c.deviations} deviating`)),
+    el("div.small.muted", c.method === "reconstruct" ? `Exact geometry (${c.supporting_points_count} supporting points)` : `Via points: ${c.waypoints.map(p => p.map(v => (+v).toFixed(4)).join(", ")).join(" → ")}`),
     c.note ? el("div.small", c.note) : null);
   const act = el("div.actions");
   const post = (path, body = {}) => api(`/api/corridors/${c.id}${path}`, { method: "POST", body });
+  const guard = fn => async () => { try { await fn(); } catch (e) { toast(e.message, 6000); } };
   if (!c.hidden) act.appendChild(el("button.small", { onclick: () => { S.focusCorridor = c.id; drawSetup(); } }, "Show on map"));
+  if (c.deviations) act.appendChild(el("button.small", { onclick: guard(async () => { S.devOpen = S.devOpen === c.id ? null : c.id; renderCorridors(); }) },
+    S.devOpen === c.id ? "Hide deviations" : `Inspect deviations (${c.deviations})`));
+  if (isAdmin()) act.appendChild(el("button.small", { onclick: () => { S.editCorridor = S.editCorridor === c.id ? null : c.id; renderCorridors(); } }, S.editCorridor === c.id ? "Close editor" : "Edit"));
   if (isAdmin() && c.status === "draft") {
     act.appendChild(el("button.small", { onclick: () => preview(c) }, c.method === "waypoints" ? "Preview (1 request)" : "Preview again (1 request)"));
     act.appendChild(el("button.small.primary", { disabled: !c.preview_variant_id, title: c.preview_variant_id ? "" : "Preview first",
-      onclick: async () => { if (!confirm(`Confirm '${c.name}' with the previewed geometry as its reference?`)) return; await post("/confirm"); toast("Confirmed"); await after(); } }, "Confirm"));
+      onclick: guard(async () => { if (!confirm(`Confirm '${c.name}' with the previewed geometry as its reference? Collection starts with the next cycle (${RT.meta.requests_per_cycle + 1} requests per cycle).`)) return; await post("/confirm"); toast("Confirmed"); await after(); }) }, "Confirm"));
     if (c.method === "waypoints") act.appendChild(el("button.small", { onclick: () => startDraft(c) }, "Edit via points"));
   }
-  if (isAdmin() && c.status !== "retired") {
-    act.appendChild(el("button.small", { onclick: async () => { const n = prompt("Name", c.name); if (n) { await api(`/api/corridors/${c.id}`, { method: "PUT", body: { name: n } }); loadSetup(); } } }, "Rename"));
-    act.appendChild(el("button.small", { title: "How far (in metres) a returned route may stray from the corridor's reference before it is flagged as a deviation",
-      onclick: async () => {
-        const v = prompt("Deviation tolerance in metres (50-5000). A returned route that strays further than this from the corridor's reference is flagged. Applies to new observations.", c.deviation_threshold_m);
-        if (v === null || v.trim() === "") return;
-        const t = Math.round(Number(v));
-        if (!Number.isFinite(t) || t < 50 || t > 5000) { toast("Enter a number between 50 and 5000"); return; }
-        await api(`/api/corridors/${c.id}`, { method: "PUT", body: { deviation_threshold_m: t } }); toast(`Tolerance set to ${t} m`); loadSetup();
-      } }, "Tolerance"));
-  }
-  if (isAdmin() && c.status === "confirmed") act.appendChild(el("button.small.danger", { onclick: async () => { if (confirm("Retire this corridor? Its history is kept, collection stops.")) { await post("/retire"); await after(); } } }, "Retire"));
+  if (isAdmin() && c.status === "confirmed") act.appendChild(el("button.small.danger", { onclick: guard(async () => { if (confirm(`Retire '${c.name}'? Collection stops (one request less per cycle). Its ${c.observations} observations are kept and stay in the analysis; you can hide it afterwards.`)) { await post("/retire"); toast("Retired"); await after(); } }) }, "Retire"));
   if (isAdmin() && c.status === "retired" && !c.hidden) act.appendChild(el("button.small", { title: "Remove from the corridor list and the analysis; observations are kept",
-    onclick: async () => { if (confirm(`Hide '${c.name}'? It disappears from the analysis charts and selectors. Its ${c.observations} observations are kept and you can show it again later.`)) { await post("/hide"); toast("Hidden"); await after(); } } }, "Hide"));
+    onclick: guard(async () => { if (confirm(`Hide '${c.name}'? It disappears from the analysis, charts and selectors. Its ${c.observations} observations are kept and you can show it again at any time.`)) { await post("/hide"); toast("Hidden"); await after(); } }) }, "Hide"));
   if (isAdmin() && c.hidden) {
-    act.appendChild(el("button.small", { onclick: async () => { await post("/unhide"); await after(); } }, "Show again"));
-    act.appendChild(el("button.small.danger", { onclick: async () => {
-      if (!confirm(`Permanently delete '${c.name}' and its ${c.observations} observations? This cannot be undone (backups still contain them).`)) return;
+    act.appendChild(el("button.small", { onclick: guard(async () => { await post("/unhide"); toast("Shown again"); await after(); }) }, "Show again"));
+    act.appendChild(el("button.small.danger", { onclick: guard(async () => {
+      const typed = prompt(`Permanently delete '${c.name}' and its ${c.observations} observations? This cannot be undone (existing backups still contain them).\n\nType the corridor name to confirm:`);
+      if (typed === null) return;
+      if (typed.trim() !== c.name) { toast("Name did not match; nothing was deleted."); return; }
       await api(`/api/corridors/${c.id}?purge=true`, { method: "DELETE" }); toast("Deleted"); await after();
-    } }, "Delete permanently"));
+    }) }, "Delete permanently"));
   }
-  if (isAdmin() && c.observations === 0 && !c.hidden) act.appendChild(el("button.small.danger", { onclick: async () => { if (confirm("Delete this corridor?")) { await api(`/api/corridors/${c.id}`, { method: "DELETE" }); await after(); } } }, "Delete"));
+  if (isAdmin() && c.observations === 0 && !c.hidden) act.appendChild(el("button.small.danger", { onclick: guard(async () => { if (confirm(`Delete '${c.name}'? It has no observations.`)) { await api(`/api/corridors/${c.id}`, { method: "DELETE" }); await after(); } }) }, "Delete"));
   row.appendChild(act);
+  if (S.editCorridor === c.id) row.appendChild(corridorEditor(c, after));
+  if (S.devOpen === c.id) row.appendChild(deviationList(c));
   return row;
+}
+
+function corridorEditor(c, after) {
+  const f = el("div.edit-form");
+  const name = el("input", { value: c.name, maxlength: 80, "aria-label": "Name" });
+  const color = el("select", { "aria-label": "Colour" }, [...new Set([c.color, ...S.setup.colors])].map(x => el("option", { value: x, style: { color: x } }, "■ " + x)));
+  color.value = c.color;
+  const tol = el("input", { type: "number", min: 50, max: 5000, step: 50, value: c.deviation_threshold_m, "aria-label": "Deviation tolerance in metres", disabled: c.status === "retired" });
+  const note = el("input", { value: c.note || "", maxlength: 500, "aria-label": "Note" });
+  f.appendChild(el("div.field", el("label", "Name"), name));
+  f.appendChild(el("div.field", el("label", "Colour"), color));
+  f.appendChild(el("div.field", el("label", { title: "50–5000 m. Applies to new observations; earlier flags are kept." }, "Deviation tolerance (m)"), tol));
+  f.appendChild(el("div.field", { style: { gridColumn: "1 / -1" } }, el("label", "Note"), note));
+  f.appendChild(el("div.row", { style: { gridColumn: "1 / -1" } },
+    el("button.small.primary", { onclick: async () => {
+      const body = { name: name.value.trim(), color: color.value, note: note.value };
+      if (c.status !== "retired") {
+        const t = Math.round(Number(tol.value));
+        if (!Number.isFinite(t) || t < 50 || t > 5000) { toast("Tolerance must be between 50 and 5000 m"); return; }
+        if (t !== c.deviation_threshold_m && !confirm(`Change the tolerance from ${c.deviation_threshold_m} m to ${t} m? It applies to new observations only; earlier observations keep their flags.`)) return;
+        body.deviation_threshold_m = t;
+      }
+      try { await api(`/api/corridors/${c.id}`, { method: "PUT", body }); S.editCorridor = null; toast("Saved"); await after(); } catch (e) { toast(e.message, 6000); }
+    } }, "Save"),
+    el("span.small.muted", "Routes cannot be changed after confirmation, or the history would mix two routes. Retire it and create a new corridor instead.")));
+  return f;
+}
+
+function deviationList(c) {
+  const box = el("div.devlist", el("div.small.muted", `Routes TomTom took for this corridor that strayed more than ${c.deviation_threshold_m} m from the confirmed geometry, grouped by distinct route. They stay part of the corridor's statistics.`));
+  api(`/api/corridors/${c.id}/deviations`).then(d => {
+    if (!d.deviations.length) { box.appendChild(el("div.small", "None.")); return; }
+    for (const x of d.deviations) {
+      box.appendChild(el("div.dev",
+        el("div.row", el("b", `${x.roads.slice(0, 3).join(", ") || "route " + x.family_id}`), el("span.spacer"),
+          el("button.small", { onclick: () => { S.focusDeviation = { corridor: c, ref: d.reference_variant_id, variant: x.representative_variant_id, label: x.roads.slice(0, 3).join(", ") }; drawSetup(); } }, "Compare on map")),
+        el("div.muted", `${x.n} observations (${fmtPct(x.share_of_observations)} of this corridor) · ${fmtTime(x.first_utc, true)} – ${fmtTime(x.last_utc, true)} · ` +
+          `max ${x.max_m ?? "?"} m away · ${fmtKm(x.length_m)} · median ${fmtMin(x.median_travel_time_s)}`)));
+    }
+  }).catch(e => box.appendChild(el("div.small", e.message)));
+  return box;
 }
 
 function renderCorridors() {
@@ -668,21 +779,25 @@ function renderCorridors() {
 
 async function renderVariants() {
   const box = clear($("s-variants"));
-  box.appendChild(el("h2", "Routes TomTom returned"));
+  box.appendChild(el("h2", "Distinct routes collected"));
   if (!S.setup.directions.length) {
     box.appendChild(el("p.small.muted", "Create a journey first. Routes will appear after collection starts."));
     return;
   }
-  box.appendChild(el("p.small.muted", "Distinct geometries from unrestricted requests (recommendations and extra alternatives). You can turn one into an exact-geometry corridor draft without a new request."));
-  const v = await api(`/api/variants?direction_id=${S.direction}&key=unrestricted`);
-  if (!v.variants.length) { box.appendChild(el("p.small", "None yet.")); return; }
-  const t = el("table", el("thead", el("tr", el("th", "#"), el("th", "Roads"), el("th.num", "Length"), el("th.num", "Seen"), el("th", "Last seen"), el("th", ""))));
+  box.appendChild(el("p.small.muted", "Every route TomTom returned for this direction, grouped by road route (small geometry differences share one number). " +
+    "You can turn one into an exact-geometry corridor draft without a new request."));
+  const v = await api(`/api/families?direction_id=${S.direction}`);
+  const rows = v.families.filter(x => x.n);
+  if (!rows.length) { box.appendChild(el("p.small", "None yet.")); return; }
+  const t = el("table", el("thead", el("tr", el("th", "Route"), el("th", "Roads"), el("th.num", "Length"), el("th.num", "Recommended"), el("th.num", "Alternative"), el("th.num", "Corridor"), el("th", "Last seen"), el("th", ""))));
   const tb = el("tbody");
-  for (const x of v.variants.slice(0, 15)) {
+  for (const x of rows.slice(0, 25)) {
     tb.appendChild(el("tr",
-      el("td", x.id), el("td", { title: x.roads.join(", ") }, x.roads.slice(0, 4).join(", ") || "—"), el("td.num", fmtKm(x.length_m)), el("td.num", x.n), el("td", fmtTime(x.last_utc, true)),
-      el("td", el("button.small", { onclick: () => { S.focusVariant = x.id; drawSetup(); } }, "Show"),
-        isAdmin() ? el("button.small", { onclick: async () => { const n = prompt("Name for the new corridor draft", (x.roads.slice(0, 3).join(" / ") || "Route " + x.id)); if (!n) return; await api("/api/corridors/from-variant", { method: "POST", body: { variant_id: x.id, name: n } }); toast("Draft created"); await refreshMeta(); loadSetup(); } }, "Use as corridor") : null)));
+      el("td", x.id), el("td", { title: x.roads.join(", ") }, x.roads.slice(0, 3).join(", ") || "—", x.corridor ? el("div.conf", "= " + x.corridor.name) : null),
+      el("td.num", fmtKm(x.length_m)), el("td.num", x.n_recommended || 0), el("td.num", x.n_alternative || 0), el("td.num", x.n_corridor || 0),
+      el("td", fmtTime(x.last_utc, true)),
+      el("td", el("button.small", { onclick: () => { S.focusVariant = x.representative_variant_id; drawSetup(); } }, "Show"),
+        isAdmin() && !x.corridor ? el("button.small", { onclick: async () => { const n = prompt("Name for the new corridor draft", (x.roads.slice(0, 3).join(" / ") || "Route " + x.id)); if (!n) return; await api("/api/corridors/from-variant", { method: "POST", body: { variant_id: x.representative_variant_id, name: n } }); toast("Draft created"); await refreshMeta(); loadSetup(); } }, "Use as corridor") : null)));
   }
   t.appendChild(tb);
   box.appendChild(el("div.table-wrap", t));
@@ -698,7 +813,7 @@ async function drawSetup() {
   L.circleMarker(d.to, { radius: 8, color: "#fff", weight: 2, fillColor: "#e34948", fillOpacity: 1 }).bindTooltip(d.to_label + " (end)").addTo(S.setupLayers);
   let note = "";
   for (const c of d.corridors) {
-    if (c.status === "retired") continue;
+    if (c.status === "retired" || S.focusDeviation) continue;  // a deviation comparison shows only the two routes involved
     const focus = !S.focusCorridor || S.focusCorridor === c.id;
     const vid = c.reference_variant_id || c.preview_variant_id;
     if (vid) {
@@ -709,6 +824,13 @@ async function drawSetup() {
     }
     c.waypoints.forEach((p, i) => L.marker(p, { title: `${c.name}: via point ${i + 1}`, opacity: focus ? 1 : .5 }).bindTooltip(`${c.name}: via ${i + 1}`).addTo(S.setupLayers));
     if (focus && S.focusCorridor) note = c.status === "draft" ? (vid ? "Dashed: previewed draft geometry. Confirm only if this is the route you mean." : "Not previewed yet: only the via points are shown.") : "Solid: the confirmed reference geometry.";
+  }
+  if (S.focusDeviation) {
+    const f = S.focusDeviation, ref = f.ref && await variantCoords(f.ref), dv = await variantCoords(f.variant);
+    if (ref) routeLine(ref, f.corridor.color, { weight: 6 }).bindTooltip(`${f.corridor.name}: confirmed geometry`, { sticky: true }).addTo(S.setupLayers);
+    if (dv) { routeLine(dv, "#d03b3b", { weight: 4, dash: "6 6" }).bindTooltip(`Deviating route${f.label ? " via " + f.label : ""}`, { sticky: true }).addTo(S.setupLayers); b.push(...dv); }
+    note = `Solid: ${f.corridor.name}'s confirmed geometry. Red dashed: the deviating route TomTom returned for it.`;
+    S.focusDeviation = null;
   }
   if (S.focusVariant) {
     const coords = await variantCoords(S.focusVariant);
@@ -771,7 +893,8 @@ async function loadBudget() {
     kpi(r.ceiling, "application ceiling"),
     kpi(r.remaining_to_ceiling, "remaining to ceiling"),
     kpi(f.remaining_scheduled_requests, `scheduled until reset (${f.requests_per_cycle}/cycle)`),
-    kpi(f.projected_period_total, "projected period total")));
+    kpi(f.projected_period_total, "projected period total"),
+    kpi(f.spare_after_schedule, "spare after the schedule (retries, manual, previews)")));
   const pct = r.ceiling ? Math.min(100, r.used / r.ceiling * 100) : 100;
   const bar = el("div.bar", { style: { marginTop: "12px" } }, el("div", { style: { width: pct + "%", background: r.warning ? "var(--warn)" : "var(--accent)" } }),
     el("i", { style: { left: r.warning_percent + "%" }, title: "warning threshold" }));
@@ -782,13 +905,39 @@ async function loadBudget() {
     (r.hard_ceiling_override ? ` (overridden: ${r.hard_ceiling_override})` : "") + `. A full period at the current plan needs about ${f.nominal_full_period_requests} requests.`));
   c1.appendChild(el("p.small.muted", `Period ${fmtTime(p.start_utc, true)} – ${fmtTime(p.end_utc, true)} (${p.period_type}, reset timezone ${p.reset_timezone}, ` +
     (p.reset_confirmed ? "reset time confirmed" : `reset time NOT confirmed: collection resumes ${RT.meta && "after a grace period"}, at ${fmtTime(p.resume_at_utc, true)}`) + ")."));
+  if (r.hard_ceiling_clamped) c1.appendChild(el("p.banner.warn", `The hard ceiling override (${r.hard_ceiling_override}) is higher than allowance − other applications, so ${r.ceiling} is used instead.`));
+  if (f.spare_after_schedule < 0) c1.appendChild(el("p.banner.warn", `The schedule needs ${-f.spare_after_schedule} more requests than the ceiling allows this period. The last cycles will be skipped (shown as skipped: budget_protection); the ceiling is never exceeded.`));
   c1.appendChild(el("p.small", b.scope_note));
+  if (b.daily && b.daily.length) {
+    const daily = b.daily, perDay = f.requests_per_cycle * Math.floor(1440 / f.interval_minutes), max = Math.max(perDay, ...daily.map(d => d.counted));
+    c1.appendChild(el("h3", { style: { marginTop: "12px" } }, "Counted requests per day (UTC) this period"));
+    c1.appendChild(el("div.daybars", daily.map(d => {
+      const sched = d.by_purpose.schedule || 0, extra = d.counted - sched;
+      return el("div.daycol", { title: `${d.day_utc}: ${d.counted} counted (${Object.entries(d.by_purpose).map(([k, v]) => `${k} ${v}`).join(", ")})${d.failed_or_blocked ? `, ${d.failed_or_blocked} failed or blocked` : ""}` },
+        el("div.over", { style: { height: (extra / max * 100) + "%" } }), el("div", { style: { height: (sched / max * 100) + "%" } }));
+    })));
+    c1.appendChild(el("p.small.muted", `Blue: scheduled cycles (a full day at the current plan is ${perDay}). Orange: retries, manual refreshes, previews and verification.`));
+  }
   box.appendChild(c1);
+
+  const sc = b.schedule;
+  if (sc) {
+    const last = sc.last_cycle;
+    const healthy = sc.enabled && sc.thread_running && sc.holds_lease;
+    box.appendChild(el("div.card", el("h2", "Scheduled collection"),
+      el("div.row",
+        healthy ? el("span.badge.ok", "✓ Running") : el("span.badge." + (sc.enabled ? "bad" : "warn"), !sc.enabled ? "Switched off" : !sc.thread_running ? "Scheduler not running" : "Standby (another instance holds the lease)"),
+        el("span.small", `every ${f.interval_minutes} min · next slot ${fmtTime(sc.next_slot_utc)}`),
+        sc.last_heartbeat_utc ? el("span.small.muted", `heartbeat ${fmtTime(sc.last_heartbeat_utc)}`) : null),
+      el("p.small", last ? `Last slot ${fmtTime(last.slot_utc, true)}: ${statusLabel(last.status)}${last.reason ? " (" + last.reason + ")" : ""}, ${last.attempted_requests} requests.` : "No scheduled slot recorded yet."),
+      el("p.small.muted", "Last 24 hours: " + (Object.entries(sc.last_24h).map(([k, v]) => `${v} ${statusLabel(k)}`).join(" · ") || "nothing recorded") +
+        ". Slots missed while the app was down are recorded as missed and never caught up, so a restart cannot cause a burst of requests.")));
+  }
 
   const c2 = el("div.card", el("h2", "Map tiles"));
   for (const k of ["map", "traffic"]) {
     const t = b.tiles[k];
-    c2.appendChild(el("div.small", `${k === "map" ? "Map display" : "Traffic flow"} tiles this period: ${t.observable ? t.used : "not observable (direct browser mode)"} of ceiling ${t.ceiling} (allowance ${t.allowance})`));
+    c2.appendChild(el("div.small", `${k === "map" ? "Map display" : "Traffic flow"} tiles this period: ${t.observable ? t.used : RT.meta.map.mode === "off" ? "none (map tiles switched off)" : "not observable (direct browser mode)"} of ceiling ${t.ceiling} (allowance ${t.allowance})`));
   }
   box.appendChild(c2);
 
