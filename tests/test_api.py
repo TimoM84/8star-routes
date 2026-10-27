@@ -7,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.config import Config
-from app.db import Database, backup, restore, utcnow
+from app.db import MIGRATIONS_DIR, Database, backup, restore, utcnow
 from app.main import create_app
 from app.tomtom import RouteRequest, TomTomClient
 from conftest import ScriptedClient
@@ -248,7 +248,7 @@ def test_restart_keeps_data_and_does_not_reseed(tmp_path):
                 s = tc.get("/api/setup").json()
                 assert len(s["journeys"]) == 1 and s["journeys"][0]["name"] == "Edited name"
     db = Database(cfg.db_path)
-    assert db.scalar("SELECT COUNT(*) FROM schema_migrations") == 1
+    assert db.scalar("SELECT COUNT(*) FROM schema_migrations") == len(list(MIGRATIONS_DIR.glob("*.sql")))  # each applied once
     db.close()
 
 
@@ -305,3 +305,36 @@ def test_live_first_run_has_no_seeded_locations_and_setup_persists(tmp_path):
         assert len(saved) == 1 and saved[0]["name"] == "Private commute"
         assert saved[0]["origin_lat"] == 51.1 and saved[0]["dest_lon"] == 5.2
         assert saved[0]["origin_label"] == "Home" and saved[0]["dest_label"] == "Work"
+
+
+def test_corridor_tolerance_hide_and_purge(app_env):
+    tc, client, _ = app_env
+    login(tc)
+    cid = tc.post("/api/corridors", json={"direction_id": 1, "name": "Old corridor", "waypoints": [[52.02, 4.3]]}, headers=H).json()["id"]
+    tc.post(f"/api/corridors/{cid}/preview", json={}, headers=H)
+    assert tc.post(f"/api/corridors/{cid}/confirm", json={}, headers=H).status_code == 200
+    assert tc.post("/api/collect", json={"direction_ids": [1]}, headers=H).status_code == 200
+    db = tc.app.state.s.db
+    assert db.scalar("SELECT COUNT(*) FROM observations WHERE corridor_id = ?", (cid,)) == 1
+    # Tolerance is adjustable per corridor and validated.
+    assert tc.put(f"/api/corridors/{cid}", json={"deviation_threshold_m": "x"}, headers=H).status_code == 400
+    assert tc.put(f"/api/corridors/{cid}", json={"deviation_threshold_m": 10}, headers=H).status_code == 400
+    assert tc.put(f"/api/corridors/{cid}", json={"deviation_threshold_m": 800}, headers=H).status_code == 200
+    assert db.scalar("SELECT deviation_threshold_m FROM corridors WHERE id = ?", (cid,)) == 800
+    # Only retired corridors can be hidden; hiding keeps the history but removes it from the analysis.
+    assert tc.post(f"/api/corridors/{cid}/hide", json={}, headers=H).status_code == 409
+    tc.post(f"/api/corridors/{cid}/retire", json={}, headers=H)
+    keys = lambda: [r["key"] for r in tc.get("/api/stats?direction_id=1").json()["routes"]]  # noqa: E731
+    assert f"corridor:{cid}" in keys()
+    assert tc.post(f"/api/corridors/{cid}/hide", json={}, headers=H).status_code == 200
+    assert f"corridor:{cid}" not in keys()
+    c = next(c for d in tc.get("/api/setup").json()["directions"] for c in d["corridors"] if c["id"] == cid)
+    assert c["hidden"] is True and c["observations"] == 1
+    assert tc.post(f"/api/corridors/{cid}/unhide", json={}, headers=H).status_code == 200
+    assert f"corridor:{cid}" in keys()
+    # Deleting a corridor with history needs an explicit purge.
+    assert tc.delete(f"/api/corridors/{cid}", headers=H).status_code == 409
+    assert tc.delete(f"/api/corridors/{cid}?purge=true", headers=H).status_code == 200
+    assert db.scalar("SELECT COUNT(*) FROM observations WHERE corridor_id = ?", (cid,)) == 0
+    assert db.scalar("SELECT COUNT(*) FROM observations") > 0  # the unrestricted observation stays
+    assert tc.get("/api/stats?direction_id=1").status_code == 200

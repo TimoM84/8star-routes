@@ -36,7 +36,7 @@ def percentile(values: list[float], p: float) -> float | None:
 
 
 def _corridor_map(db: Database, direction_id: int) -> dict[int, dict]:
-    return {c["id"]: c for c in corridor_rows(db, direction_id, ("draft", "confirmed", "retired"))}
+    return {c["id"]: c for c in corridor_rows(db, direction_id, ("draft", "confirmed", "retired"), include_hidden=True)}
 
 
 def route_key(obs) -> str | None:

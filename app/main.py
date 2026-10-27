@@ -446,8 +446,9 @@ def create_app(cfg: Config | None = None, client=None, start_scheduler: bool = T
         dirs = []
         for d in direction_rows(db, enabled_only=False):
             cs = []
-            for c in corridor_rows(db, d["id"], ("draft", "confirmed", "retired")):
+            for c in corridor_rows(db, d["id"], ("draft", "confirmed", "retired"), include_hidden=True):
                 c = dict(c)
+                c["hidden"] = c["hidden_utc"] is not None
                 c["waypoints"] = json.loads(c.pop("waypoints_json") or "[]")
                 sp = c.pop("supporting_points_json")
                 c["supporting_points_count"] = len(json.loads(sp)) if sp else 0
@@ -572,10 +573,16 @@ def create_app(cfg: Config | None = None, client=None, start_scheduler: bool = T
         if "color" in payload:
             sets.append("color = ?"); vals.append(str(payload["color"])[:20])
         if "deviation_threshold_m" in payload:
-            t = int(payload["deviation_threshold_m"])
+            try:
+                t = int(payload["deviation_threshold_m"])
+            except (TypeError, ValueError):
+                raise HTTPException(400, "deviation_threshold_m must be a whole number") from None
             if not 50 <= t <= 5000:
                 raise HTTPException(400, "deviation_threshold_m must be 50-5000")
             sets.append("deviation_threshold_m = ?"); vals.append(t)
+            if t != c["deviation_threshold_m"]:
+                db.event("info", "corridor", f"Corridor '{c['name']}' deviation threshold changed from {c['deviation_threshold_m']} m to {t} m "
+                                             "(applies to new observations).")
         if "note" in payload:
             sets.append("note = ?"); vals.append(str(payload["note"])[:500])
         if "waypoints" in payload:
@@ -616,13 +623,34 @@ def create_app(cfg: Config | None = None, client=None, start_scheduler: bool = T
         db.event("info", "corridor", f"Corridor '{c['name']}' retired; its history is kept.")
         return {"ok": True}
 
-    @r.delete("/api/corridors/{cid}", dependencies=[admin])
-    def api_corridor_delete(cid: int):
+    @r.post("/api/corridors/{cid}/hide", dependencies=[admin])
+    def api_corridor_hide(cid: int):
         c = _corridor(cid)
-        if db.scalar("SELECT COUNT(*) FROM observations WHERE corridor_id = ?", (cid,)):
-            raise HTTPException(409, "This corridor has observations. Retire it instead to keep its history.")
-        db.execute("DELETE FROM corridors WHERE id = ?", (cid,))
-        db.event("info", "corridor", f"Draft corridor '{c['name']}' deleted.")
+        if c["status"] != "retired":
+            raise HTTPException(409, "Retire the corridor before hiding it")
+        db.execute("UPDATE corridors SET hidden_utc = ?, updated_utc = ? WHERE id = ?", (iso(utcnow()), iso(utcnow()), cid))
+        db.event("info", "corridor", f"Retired corridor '{c['name']}' hidden; its observations are kept.")
+        return {"ok": True}
+
+    @r.post("/api/corridors/{cid}/unhide", dependencies=[admin])
+    def api_corridor_unhide(cid: int):
+        c = _corridor(cid)
+        db.execute("UPDATE corridors SET hidden_utc = NULL, updated_utc = ? WHERE id = ?", (iso(utcnow()), cid))
+        db.event("info", "corridor", f"Corridor '{c['name']}' shown again.")
+        return {"ok": True}
+
+    @r.delete("/api/corridors/{cid}", dependencies=[admin])
+    def api_corridor_delete(cid: int, purge: bool = False):
+        """Delete a corridor. With observations only when retired and purge=true, which deletes its history too."""
+        c = _corridor(cid)
+        n = db.scalar("SELECT COUNT(*) FROM observations WHERE corridor_id = ?", (cid,))
+        if n and not (purge and c["status"] == "retired"):
+            raise HTTPException(409, "This corridor has observations. Retire and hide it to keep its history, "
+                                     "or delete a retired corridor with purge=true to remove its observations as well.")
+        with db.tx():
+            db.execute("DELETE FROM observations WHERE corridor_id = ? AND role = 'corridor'", (cid,))
+            db.execute("DELETE FROM corridors WHERE id = ?", (cid,))  # remaining references become NULL (ON DELETE SET NULL)
+        db.event("info", "corridor", f"Corridor '{c['name']}' deleted" + (f" with {n} observations." if n else "."))
         return {"ok": True}
 
     # --- admin misc ------------------------------------------------------------------

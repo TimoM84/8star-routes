@@ -53,10 +53,11 @@ def direction_rows(db: Database, enabled_only: bool = True) -> list[dict]:
     return out
 
 
-def corridor_rows(db: Database, direction_id: int, statuses=("confirmed",)) -> list[dict]:
+def corridor_rows(db: Database, direction_id: int, statuses=("confirmed",), include_hidden: bool = False) -> list[dict]:
     q = ",".join("?" * len(statuses))
+    hidden = "" if include_hidden else " AND hidden_utc IS NULL"
     return [dict(r) for r in db.all(
-        f"SELECT * FROM corridors WHERE direction_id = ? AND status IN ({q}) ORDER BY sort, id", (direction_id, *statuses))]
+        f"SELECT * FROM corridors WHERE direction_id = ? AND status IN ({q}){hidden} ORDER BY sort, id", (direction_id, *statuses))]
 
 
 def build_request(direction: dict, corridor: dict | None, cfg: Config) -> RouteRequest:

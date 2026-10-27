@@ -564,6 +564,48 @@ async function refreshMeta() {
   renderBanners();
 }
 
+function corridorRow(c, after) {
+  const st = c.status === "confirmed" ? el("span.badge.ok", "✓ Confirmed") : c.status === "draft" ? el("span.badge.warn", c.source === "suggested" ? "Draft · suggested, unconfirmed" : "Draft") : el("span.badge.neutral", c.hidden ? "Retired · hidden" : "Retired");
+  const row = el("div.corridor",
+    el("div.row", el("span", { style: { width: "14px", height: "4px", background: c.color, borderRadius: "2px" } }), el("b", c.name), el("span.spacer"), st),
+    el("div.small.muted", `${c.method === "reconstruct" ? `Exact geometry (${c.supporting_points_count} supporting points)` : `Via points: ${c.waypoints.map(p => p.map(v => (+v).toFixed(4)).join(", ")).join(" → ")}`}` +
+      ` · ${c.observations} observations · ${c.deviations} deviations · tolerance ${c.deviation_threshold_m} m`),
+    c.note ? el("div.small", c.note) : null);
+  const act = el("div.actions");
+  const post = (path, body = {}) => api(`/api/corridors/${c.id}${path}`, { method: "POST", body });
+  if (!c.hidden) act.appendChild(el("button.small", { onclick: () => { S.focusCorridor = c.id; drawSetup(); } }, "Show on map"));
+  if (isAdmin() && c.status === "draft") {
+    act.appendChild(el("button.small", { onclick: () => preview(c) }, c.method === "waypoints" ? "Preview (1 request)" : "Preview again (1 request)"));
+    act.appendChild(el("button.small.primary", { disabled: !c.preview_variant_id, title: c.preview_variant_id ? "" : "Preview first",
+      onclick: async () => { if (!confirm(`Confirm '${c.name}' with the previewed geometry as its reference?`)) return; await post("/confirm"); toast("Confirmed"); await after(); } }, "Confirm"));
+    if (c.method === "waypoints") act.appendChild(el("button.small", { onclick: () => startDraft(c) }, "Edit via points"));
+  }
+  if (isAdmin() && c.status !== "retired") {
+    act.appendChild(el("button.small", { onclick: async () => { const n = prompt("Name", c.name); if (n) { await api(`/api/corridors/${c.id}`, { method: "PUT", body: { name: n } }); loadSetup(); } } }, "Rename"));
+    act.appendChild(el("button.small", { title: "How far (in metres) a returned route may stray from the corridor's reference before it is flagged as a deviation",
+      onclick: async () => {
+        const v = prompt("Deviation tolerance in metres (50-5000). A returned route that strays further than this from the corridor's reference is flagged. Applies to new observations.", c.deviation_threshold_m);
+        if (v === null || v.trim() === "") return;
+        const t = Math.round(Number(v));
+        if (!Number.isFinite(t) || t < 50 || t > 5000) { toast("Enter a number between 50 and 5000"); return; }
+        await api(`/api/corridors/${c.id}`, { method: "PUT", body: { deviation_threshold_m: t } }); toast(`Tolerance set to ${t} m`); loadSetup();
+      } }, "Tolerance"));
+  }
+  if (isAdmin() && c.status === "confirmed") act.appendChild(el("button.small.danger", { onclick: async () => { if (confirm("Retire this corridor? Its history is kept, collection stops.")) { await post("/retire"); await after(); } } }, "Retire"));
+  if (isAdmin() && c.status === "retired" && !c.hidden) act.appendChild(el("button.small", { title: "Remove from the corridor list and the analysis; observations are kept",
+    onclick: async () => { if (confirm(`Hide '${c.name}'? It disappears from the analysis charts and selectors. Its ${c.observations} observations are kept and you can show it again later.`)) { await post("/hide"); toast("Hidden"); await after(); } } }, "Hide"));
+  if (isAdmin() && c.hidden) {
+    act.appendChild(el("button.small", { onclick: async () => { await post("/unhide"); await after(); } }, "Show again"));
+    act.appendChild(el("button.small.danger", { onclick: async () => {
+      if (!confirm(`Permanently delete '${c.name}' and its ${c.observations} observations? This cannot be undone (backups still contain them).`)) return;
+      await api(`/api/corridors/${c.id}?purge=true`, { method: "DELETE" }); toast("Deleted"); await after();
+    } }, "Delete permanently"));
+  }
+  if (isAdmin() && c.observations === 0 && !c.hidden) act.appendChild(el("button.small.danger", { onclick: async () => { if (confirm("Delete this corridor?")) { await api(`/api/corridors/${c.id}`, { method: "DELETE" }); await after(); } } }, "Delete"));
+  row.appendChild(act);
+  return row;
+}
+
 function renderCorridors() {
   const box = clear($("s-corridors"));
   box.appendChild(el("h2", "Corridors"));
@@ -575,26 +617,14 @@ function renderCorridors() {
   box.appendChild(sel);
   const d = S.setup.directions.find(x => x.id === S.direction);
   if (!d) return;
-  for (const c of d.corridors) {
-    const st = c.status === "confirmed" ? el("span.badge.ok", "✓ Confirmed") : c.status === "draft" ? el("span.badge.warn", c.source === "suggested" ? "Draft · suggested, unconfirmed" : "Draft") : el("span.badge.neutral", "Retired");
-    const row = el("div.corridor",
-      el("div.row", el("span", { style: { width: "14px", height: "4px", background: c.color, borderRadius: "2px" } }), el("b", c.name), el("span.spacer"), st),
-      el("div.small.muted", `${c.method === "reconstruct" ? `Exact geometry (${c.supporting_points_count} supporting points)` : `Via points: ${c.waypoints.map(p => p.map(v => (+v).toFixed(4)).join(", ")).join(" → ")}`}` +
-        ` · ${c.observations} observations · ${c.deviations} deviations · threshold ${c.deviation_threshold_m} m`),
-      c.note ? el("div.small", c.note) : null);
-    const act = el("div.actions");
-    act.appendChild(el("button.small", { onclick: () => { S.focusCorridor = c.id; drawSetup(); } }, "Show on map"));
-    if (isAdmin() && c.status === "draft") {
-      act.appendChild(el("button.small", { onclick: () => preview(c) }, c.method === "waypoints" ? "Preview (1 request)" : "Preview again (1 request)"));
-      act.appendChild(el("button.small.primary", { disabled: !c.preview_variant_id, title: c.preview_variant_id ? "" : "Preview first",
-        onclick: async () => { if (!confirm(`Confirm '${c.name}' with the previewed geometry as its reference?`)) return; await api(`/api/corridors/${c.id}/confirm`, { method: "POST", body: {} }); toast("Confirmed"); await refreshMeta(); loadSetup(); } }, "Confirm"));
-      if (c.method === "waypoints") act.appendChild(el("button.small", { onclick: () => startDraft(c) }, "Edit via points"));
-    }
-    if (isAdmin() && c.status !== "retired") act.appendChild(el("button.small", { onclick: async () => { const n = prompt("Name", c.name); if (n) { await api(`/api/corridors/${c.id}`, { method: "PUT", body: { name: n } }); loadSetup(); } } }, "Rename"));
-    if (isAdmin() && c.status === "confirmed") act.appendChild(el("button.small.danger", { onclick: async () => { if (confirm("Retire this corridor? Its history is kept, collection stops.")) { await api(`/api/corridors/${c.id}/retire`, { method: "POST", body: {} }); await refreshMeta(); loadSetup(); } } }, "Retire"));
-    if (isAdmin() && c.observations === 0) act.appendChild(el("button.small.danger", { onclick: async () => { if (confirm("Delete this draft?")) { await api(`/api/corridors/${c.id}`, { method: "DELETE" }); await refreshMeta(); loadSetup(); } } }, "Delete"));
-    row.appendChild(act);
-    box.appendChild(row);
+  const after = async () => { await refreshMeta(); loadSetup(); };
+  for (const c of d.corridors.filter(c => !c.hidden)) box.appendChild(corridorRow(c, after));
+  const hidden = d.corridors.filter(c => c.hidden);
+  if (hidden.length) {
+    const det = el("details.hidden-corridors", el("summary.small.muted", `Hidden retired corridors (${hidden.length})`),
+      el("p.small.muted", "Hidden corridors no longer appear in the analysis charts and selectors (old cycles on the history map still show what was collected). Their observations are kept unless you delete them permanently."));
+    for (const c of hidden) det.appendChild(corridorRow(c, after));
+    box.appendChild(det);
   }
   if (isAdmin()) {
     box.appendChild(el("div.row", { style: { marginTop: "10px" } },
